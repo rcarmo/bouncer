@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/tls"
 	"flag"
 	"fmt"
@@ -8,7 +9,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 
 	"github.com/rcarmo/bouncer/internal/authn"
 	"github.com/rcarmo/bouncer/internal/ca"
@@ -174,9 +177,8 @@ func main() {
 			}
 		}
 		if cfg.Server.Cloudflare {
-			// Auto-add cloudflare param.
-			html = strings.Replace(html, "window.location.search",
-				"'?cloudflare=1'", 1)
+			html = strings.Replace(html, "<head>",
+				"<head>\n<meta name=\"cloudflare\" content=\"true\">", 1)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write([]byte(html))
@@ -225,6 +227,10 @@ func main() {
 		}
 	})
 
+	// Shutdown context.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
 	// Start server.
 	addr := cfg.Server.Listen
 	if cfg.Server.Cloudflare {
@@ -233,10 +239,16 @@ func main() {
 			addr = ":8080"
 		}
 		slog.Info("starting HTTP server (Cloudflare mode)", "addr", addr)
-		if err := http.ListenAndServe(addr, mux); err != nil {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
-		}
+		srv := &http.Server{Addr: addr, Handler: mux}
+		go func() {
+			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("server error", "error", err)
+				os.Exit(1)
+			}
+		}()
+		<-ctx.Done()
+		slog.Info("shutting down...")
+		srv.Shutdown(context.Background())
 	} else {
 		// Local TLS mode.
 		certPEM, keyPEM, err := ca.ServerTLSKeyPair(cfg)
@@ -260,10 +272,10 @@ func main() {
 		}
 
 		// Also listen on HTTP for cert/profile downloads.
+		var httpSrv *http.Server
 		go func() {
 			httpAddr := ":80"
 			if addr != ":443" {
-				// Derive HTTP port: use port - 363 (e.g., 8443 → 8080) or just 8080.
 				_, port, _ := net.SplitHostPort(addr)
 				if port == "443" {
 					httpAddr = ":80"
@@ -272,7 +284,6 @@ func main() {
 				}
 			}
 			httpMux := http.NewServeMux()
-			// Only serve cert routes and onboarding over HTTP.
 			httpMux.HandleFunc("GET /certs/rootCA.mobileconfig", func(w http.ResponseWriter, r *http.Request) {
 				data, err := ca.GenerateMobileconfig(cfg)
 				if err != nil {
@@ -298,13 +309,17 @@ func main() {
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.Write(data)
 			})
-			// Everything else redirects to HTTPS.
+			origin := cfg.Server.PublicOrigin
+			if origin == "" {
+				origin = "https://localhost"
+			}
 			httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				target := cfg.Server.PublicOrigin + r.URL.RequestURI()
+				target := origin + r.URL.RequestURI()
 				http.Redirect(w, r, target, http.StatusMovedPermanently)
 			})
+			httpSrv = &http.Server{Addr: httpAddr, Handler: httpMux}
 			slog.Info("starting HTTP server (cert downloads)", "addr", httpAddr)
-			if err := http.ListenAndServe(httpAddr, httpMux); err != nil {
+			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Warn("HTTP server error", "error", err)
 			}
 		}()
@@ -315,9 +330,17 @@ func main() {
 			slog.Error("TLS listen error", "error", err)
 			os.Exit(1)
 		}
-		if err := server.Serve(ln); err != nil {
-			slog.Error("server error", "error", err)
-			os.Exit(1)
+		go func() {
+			if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+				slog.Error("server error", "error", err)
+				os.Exit(1)
+			}
+		}()
+		<-ctx.Done()
+		slog.Info("shutting down...")
+		server.Shutdown(context.Background())
+		if httpSrv != nil {
+			httpSrv.Shutdown(context.Background())
 		}
 	}
 }

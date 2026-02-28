@@ -3,6 +3,7 @@ package authn
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -26,10 +27,17 @@ type Handler struct {
 	cfg     *config.Config
 	sess    *session.Store
 	trusted []*net.IPNet
+	secure  bool // whether to set Secure flag on cookies
 
 	// In-flight challenges keyed by a random challenge ID.
 	mu         sync.Mutex
-	challenges map[string]*webauthn.SessionData
+	challenges map[string]*challengeEntry
+}
+
+// challengeEntry stores a challenge with its expiry time.
+type challengeEntry struct {
+	data    *webauthn.SessionData
+	expires time.Time
 }
 
 // New creates a new WebAuthn handler.
@@ -42,13 +50,17 @@ func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet) (*Handle
 	if err != nil {
 		return nil, fmt.Errorf("authn: init webauthn: %w", err)
 	}
-	return &Handler{
+	h := &Handler{
 		wan:        wan,
 		cfg:        cfg,
 		sess:       sess,
 		trusted:    trusted,
-		challenges: make(map[string]*webauthn.SessionData),
-	}, nil
+		secure:     !cfg.Server.Cloudflare,
+		challenges: make(map[string]*challengeEntry),
+	}
+	// Start challenge cleanup goroutine.
+	go h.cleanupChallenges()
+	return h, nil
 }
 
 // --- WebAuthn User adapter ---
@@ -72,9 +84,11 @@ func (u *webauthnUser) WebAuthnDisplayName() string {
 func (u *webauthnUser) WebAuthnCredentials() []webauthn.Credential {
 	var creds []webauthn.Credential
 	for _, c := range u.user.Credentials {
+		credID, _ := base64.RawURLEncoding.DecodeString(c.ID)
+		pubKey, _ := base64.RawURLEncoding.DecodeString(c.PublicKey)
 		cred := webauthn.Credential{
-			ID:              []byte(c.ID),
-			PublicKey:       []byte(c.PublicKey),
+			ID:              credID,
+			PublicKey:       pubKey,
 			AttestationType: "",
 			Authenticator: webauthn.Authenticator{
 				SignCount: c.SignCount,
@@ -141,16 +155,11 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 	// Store challenge.
 	challengeID := randomChallengeID()
 	h.mu.Lock()
-	h.challenges[challengeID] = sessionData
+	h.challenges[challengeID] = &challengeEntry{
+		data:    sessionData,
+		expires: time.Now().Add(5 * time.Minute),
+	}
 	h.mu.Unlock()
-
-	// Clean up challenge after 5 minutes.
-	go func() {
-		time.Sleep(5 * time.Minute)
-		h.mu.Lock()
-		delete(h.challenges, challengeID)
-		h.mu.Unlock()
-	}()
 
 	resp := map[string]any{
 		"options":     options,
@@ -190,12 +199,12 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	_ = req // Suppress unused warning.
 
 	h.mu.Lock()
-	sessionData, ok := h.challenges[challengeID]
+	entry, ok := h.challenges[challengeID]
 	if ok {
 		delete(h.challenges, challengeID)
 	}
 	h.mu.Unlock()
-	if !ok {
+	if !ok || time.Now().After(entry.expires) {
 		http.Error(w, "challenge expired", http.StatusBadRequest)
 		return
 	}
@@ -208,7 +217,7 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	credential, err := h.wan.FinishRegistration(tmpUser, *sessionData, r)
+	credential, err := h.wan.FinishRegistration(tmpUser, *entry.data, r)
 	if err != nil {
 		slog.Error("webauthn: finish registration", "error", err)
 		http.Error(w, "verification failed", http.StatusBadRequest)
@@ -228,8 +237,8 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 		Name:        name,
 		Credentials: []config.Credential{
 			{
-				ID:         string(credential.ID),
-				PublicKey:  string(credential.PublicKey),
+				ID:         base64.RawURLEncoding.EncodeToString(credential.ID),
+				PublicKey:  base64.RawURLEncoding.EncodeToString(credential.PublicKey),
 				SignCount:  credential.Authenticator.SignCount,
 				Transports: transports,
 				CreatedAt:  time.Now().UTC().Format(time.RFC3339),
@@ -250,7 +259,7 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays)
+	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.secure)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
@@ -267,15 +276,11 @@ func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
 
 	challengeID := randomChallengeID()
 	h.mu.Lock()
-	h.challenges[challengeID] = sessionData
+	h.challenges[challengeID] = &challengeEntry{
+		data:    sessionData,
+		expires: time.Now().Add(5 * time.Minute),
+	}
 	h.mu.Unlock()
-
-	go func() {
-		time.Sleep(5 * time.Minute)
-		h.mu.Lock()
-		delete(h.challenges, challengeID)
-		h.mu.Unlock()
-	}()
 
 	resp := map[string]any{
 		"options":     options,
@@ -294,19 +299,20 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.mu.Lock()
-	sessionData, ok := h.challenges[challengeID]
+	entry, ok := h.challenges[challengeID]
 	if ok {
 		delete(h.challenges, challengeID)
 	}
 	h.mu.Unlock()
-	if !ok {
+	if !ok || time.Now().After(entry.expires) {
 		http.Error(w, "challenge expired", http.StatusBadRequest)
 		return
 	}
 
 	// Discoverable login handler that looks up user by credential ID.
 	userHandler := func(rawID, userHandle []byte) (webauthn.User, error) {
-		user, _ := h.cfg.FindUserByCredentialID(string(rawID))
+		credIDStr := base64.RawURLEncoding.EncodeToString(rawID)
+		user, _ := h.cfg.FindUserByCredentialID(credIDStr)
 		if user == nil {
 			// Try userHandle (which is WebAuthnID = user.ID).
 			user = h.cfg.FindUserByID(string(userHandle))
@@ -317,7 +323,7 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 		return &webauthnUser{user: user}, nil
 	}
 
-	credential, err := h.wan.FinishDiscoverableLogin(userHandler, *sessionData, r)
+	credential, err := h.wan.FinishDiscoverableLogin(userHandler, *entry.data, r)
 	if err != nil {
 		slog.Error("webauthn: finish login", "error", err)
 		http.Error(w, "authentication failed", http.StatusUnauthorized)
@@ -325,18 +331,23 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Find user by credential to update sign count.
-	user, _ := h.cfg.FindUserByCredentialID(string(credential.ID))
-	if user != nil {
-		_ = h.cfg.UpdateSignCount(user.ID, string(credential.ID), credential.Authenticator.SignCount)
-
-		sessID, err := h.sess.Create(user.ID)
-		if err != nil {
-			slog.Error("webauthn: create session", "error", err)
-			http.Error(w, "internal error", http.StatusInternalServerError)
-			return
-		}
-		setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays)
+	credIDStr := base64.RawURLEncoding.EncodeToString(credential.ID)
+	user, _ := h.cfg.FindUserByCredentialID(credIDStr)
+	if user == nil {
+		slog.Error("webauthn: user not found after login", "credentialID", credIDStr)
+		http.Error(w, `{"error":"user not found"}`, http.StatusInternalServerError)
+		return
 	}
+
+	_ = h.cfg.UpdateSignCount(user.ID, credIDStr, credential.Authenticator.SignCount)
+
+	sessID, err := h.sess.Create(user.ID)
+	if err != nil {
+		slog.Error("webauthn: create session", "error", err)
+		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		return
+	}
+	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.secure)
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -354,7 +365,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   h.secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 	w.Header().Set("Content-Type", "application/json")
@@ -373,14 +384,14 @@ func (h *Handler) isTokenValid(r *http.Request, token string) bool {
 	return token == h.cfg.Onboarding.Token
 }
 
-func setSessionCookie(w http.ResponseWriter, name, value string, ttlDays int) {
+func setSessionCookie(w http.ResponseWriter, name, value string, ttlDays int, secure bool) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,
 		Path:     "/",
 		MaxAge:   ttlDays * 86400,
 		HttpOnly: true,
-		Secure:   true,
+		Secure:   secure,
 		SameSite: http.SameSiteLaxMode,
 	})
 }
@@ -397,4 +408,20 @@ func randomChallengeID() string {
 	r := make([]byte, 8)
 	rand.Read(r)
 	return fmt.Sprintf("%x%x", b, r)
+}
+
+// cleanupChallenges periodically removes expired challenges.
+func (h *Handler) cleanupChallenges() {
+	ticker := time.NewTicker(1 * time.Minute)
+	defer ticker.Stop()
+	for range ticker.C {
+		now := time.Now()
+		h.mu.Lock()
+		for id, entry := range h.challenges {
+			if now.After(entry.expires) {
+				delete(h.challenges, id)
+			}
+		}
+		h.mu.Unlock()
+	}
 }

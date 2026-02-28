@@ -344,7 +344,7 @@ Flags:
 - HTTP server with `net/http`.
 - Reverse proxy with `httputil.NewSingleHostReverseProxy`.
 - WebAuthn using `github.com/go-webauthn/webauthn`.
-- Static UI (vendored Preact/HTM) embedded via `embed.FS`.
+- Static UI (vanilla JS) embedded via `embed.FS`.
 - JSON persistence using `encoding/json` + atomic file writes.
 - CA/cert generation using `crypto/x509`, `crypto/ecdsa`, `crypto/rand`, and `encoding/pem`.
 - Token generation: 6‑digit via `crypto/rand` (uniform 000000–999999).

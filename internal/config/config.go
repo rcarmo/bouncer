@@ -159,7 +159,9 @@ func (c *Config) SessionFilePath() string {
 // AddUser adds a user and saves.
 func (c *Config) AddUser(u User) error {
 	c.mu.Lock()
-	u.Credentials[0].CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	if len(u.Credentials) > 0 && u.Credentials[0].CreatedAt == "" {
+		u.Credentials[0].CreatedAt = time.Now().UTC().Format(time.RFC3339)
+	}
 	c.Users = append(c.Users, u)
 	c.mu.Unlock()
 	return c.Save()

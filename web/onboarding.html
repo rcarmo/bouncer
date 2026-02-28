@@ -61,8 +61,8 @@
 
 <script type="module">
 // Hide trust step in Cloudflare mode.
-const params = new URLSearchParams(window.location.search);
-if (params.get('cloudflare') === '1') {
+const cfMeta = document.querySelector('meta[name="cloudflare"]');
+if (cfMeta && cfMeta.content === 'true') {
   document.getElementById('trust-step').classList.add('hidden');
   document.getElementById('step-title').textContent = 'Create Passkey';
 }
