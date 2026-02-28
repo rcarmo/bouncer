@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/rcarmo/bouncer/internal/config"
 	"github.com/rcarmo/bouncer/internal/session"
@@ -67,6 +68,28 @@ func TestRegisterOptionsInvalidToken(t *testing.T) {
 
 	if rr.Code != http.StatusForbidden {
 		t.Errorf("expected 403, got %d", rr.Code)
+	}
+}
+
+func TestRegisterOptionsRateLimit(t *testing.T) {
+	h, _, _ := setupTestHandler(t)
+	h.rateLimit = 2
+	h.rateWindow = time.Minute
+	h.blockDuration = time.Minute
+
+	body := `{"token":"000000","displayName":"Test","name":"test"}`
+	for i := 0; i < 3; i++ {
+		req := httptest.NewRequest("POST", "/webauthn/register/options", strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.RemoteAddr = "8.8.8.8:1234"
+		rr := httptest.NewRecorder()
+		h.RegisterOptions(rr, req)
+		if i < 2 && rr.Code != http.StatusForbidden {
+			t.Fatalf("expected 403 before rate limit, got %d", rr.Code)
+		}
+		if i == 2 && rr.Code != http.StatusTooManyRequests {
+			t.Fatalf("expected 429 after rate limit, got %d", rr.Code)
+		}
 	}
 }
 

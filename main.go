@@ -231,6 +231,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	handler := withSecurityHeaders(mux)
+
 	// Start server.
 	addr := cfg.Server.Listen
 	if cfg.Server.Cloudflare {
@@ -239,7 +241,7 @@ func main() {
 			addr = ":8080"
 		}
 		slog.Info("starting HTTP server (Cloudflare mode)", "addr", addr)
-		srv := &http.Server{Addr: addr, Handler: mux}
+		srv := &http.Server{Addr: addr, Handler: handler}
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Error("server error", "error", err)
@@ -264,7 +266,7 @@ func main() {
 
 		server := &http.Server{
 			Addr:    addr,
-			Handler: mux,
+			Handler: handler,
 			TLSConfig: &tls.Config{
 				Certificates: []tls.Certificate{tlsCert},
 				MinVersion:   tls.VersionTLS12,
@@ -317,7 +319,7 @@ func main() {
 				target := origin + r.URL.RequestURI()
 				http.Redirect(w, r, target, http.StatusMovedPermanently)
 			})
-			httpSrv = &http.Server{Addr: httpAddr, Handler: httpMux}
+			httpSrv = &http.Server{Addr: httpAddr, Handler: withSecurityHeaders(httpMux)}
 			slog.Info("starting HTTP server (cert downloads)", "addr", httpAddr)
 			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Warn("HTTP server error", "error", err)
@@ -343,6 +345,16 @@ func main() {
 			httpSrv.Shutdown(context.Background())
 		}
 	}
+}
+
+func withSecurityHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+		next.ServeHTTP(w, r)
+	})
 }
 
 func setupLogging(level string) {

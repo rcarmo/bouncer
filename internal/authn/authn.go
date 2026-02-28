@@ -32,12 +32,26 @@ type Handler struct {
 	// In-flight challenges keyed by a random challenge ID.
 	mu         sync.Mutex
 	challenges map[string]*challengeEntry
+
+	// Simple per-IP rate limiting.
+	rateMu        sync.Mutex
+	rate          map[string]*rateEntry
+	rateLimit     int
+	rateWindow    time.Duration
+	blockDuration time.Duration
 }
 
 // challengeEntry stores a challenge with its expiry time.
 type challengeEntry struct {
 	data    *webauthn.SessionData
 	expires time.Time
+}
+
+// rateEntry tracks request counts per IP.
+type rateEntry struct {
+	count        int
+	reset        time.Time
+	blockedUntil time.Time
 }
 
 // New creates a new WebAuthn handler.
@@ -57,6 +71,10 @@ func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet) (*Handle
 		trusted:    trusted,
 		secure:     !cfg.Server.Cloudflare,
 		challenges: make(map[string]*challengeEntry),
+		rate:       make(map[string]*rateEntry),
+		rateLimit:  20,
+		rateWindow: time.Minute,
+		blockDuration: 5 * time.Minute,
 	}
 	// Start challenge cleanup goroutine.
 	go h.cleanupChallenges()
@@ -109,7 +127,11 @@ func (u *webauthnUser) WebAuthnIcon() string { return "" }
 // RegisterOptions handles POST /webauthn/register/options.
 func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 	if !h.cfg.Onboarding.Enabled {
-		http.Error(w, "registration disabled", http.StatusForbidden)
+		writeJSONError(w, http.StatusForbidden, "registration disabled")
+		return
+	}
+	if !h.allowRequest(r) {
+		writeJSONError(w, http.StatusTooManyRequests, "rate limited")
 		return
 	}
 
@@ -120,12 +142,12 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "bad request", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "bad request")
 		return
 	}
 
 	if !h.isTokenValid(r, req.Token) {
-		http.Error(w, "invalid token", http.StatusForbidden)
+		writeJSONError(w, http.StatusForbidden, "invalid token")
 		return
 	}
 
@@ -148,7 +170,7 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 	options, sessionData, err := h.wan.BeginRegistration(tmpUser)
 	if err != nil {
 		slog.Error("webauthn: begin registration", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -175,7 +197,11 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 // RegisterVerify handles POST /webauthn/register/verify.
 func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	if !h.cfg.Onboarding.Enabled {
-		http.Error(w, "registration disabled", http.StatusForbidden)
+		writeJSONError(w, http.StatusForbidden, "registration disabled")
+		return
+	}
+	if !h.allowRequest(r) {
+		writeJSONError(w, http.StatusTooManyRequests, "rate limited")
 		return
 	}
 
@@ -193,7 +219,7 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	if challengeID == "" {
 		// Try parsing a wrapper object.
 		// For simplicity, require query params.
-		http.Error(w, "missing challengeId", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing challengeId")
 		return
 	}
 	_ = req // Suppress unused warning.
@@ -205,7 +231,7 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Unlock()
 	if !ok || time.Now().After(entry.expires) {
-		http.Error(w, "challenge expired", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "challenge expired")
 		return
 	}
 
@@ -220,7 +246,7 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	credential, err := h.wan.FinishRegistration(tmpUser, *entry.data, r)
 	if err != nil {
 		slog.Error("webauthn: finish registration", "error", err)
-		http.Error(w, "verification failed", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "verification failed")
 		return
 	}
 
@@ -247,7 +273,7 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := h.cfg.AddUser(newUser); err != nil {
 		slog.Error("webauthn: save user", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -255,7 +281,7 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	sessID, err := h.sess.Create(userID)
 	if err != nil {
 		slog.Error("webauthn: create session", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -266,11 +292,15 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 
 // LoginOptions handles POST /webauthn/login/options.
 func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
+	if !h.allowRequest(r) {
+		writeJSONError(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
 	// Discoverable credential flow: no user specified.
 	options, sessionData, err := h.wan.BeginDiscoverableLogin()
 	if err != nil {
 		slog.Error("webauthn: begin login", "error", err)
-		http.Error(w, "internal error", http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
@@ -292,9 +322,13 @@ func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
 
 // LoginVerify handles POST /webauthn/login/verify.
 func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
+	if !h.allowRequest(r) {
+		writeJSONError(w, http.StatusTooManyRequests, "rate limited")
+		return
+	}
 	challengeID := r.URL.Query().Get("challengeId")
 	if challengeID == "" {
-		http.Error(w, "missing challengeId", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "missing challengeId")
 		return
 	}
 
@@ -305,7 +339,7 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 	}
 	h.mu.Unlock()
 	if !ok || time.Now().After(entry.expires) {
-		http.Error(w, "challenge expired", http.StatusBadRequest)
+		writeJSONError(w, http.StatusBadRequest, "challenge expired")
 		return
 	}
 
@@ -326,7 +360,7 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 	credential, err := h.wan.FinishDiscoverableLogin(userHandler, *entry.data, r)
 	if err != nil {
 		slog.Error("webauthn: finish login", "error", err)
-		http.Error(w, "authentication failed", http.StatusUnauthorized)
+		writeJSONError(w, http.StatusUnauthorized, "authentication failed")
 		return
 	}
 
@@ -335,7 +369,7 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 	user, _ := h.cfg.FindUserByCredentialID(credIDStr)
 	if user == nil {
 		slog.Error("webauthn: user not found after login", "credentialID", credIDStr)
-		http.Error(w, `{"error":"user not found"}`, http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "user not found")
 		return
 	}
 
@@ -344,7 +378,7 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 	sessID, err := h.sess.Create(user.ID)
 	if err != nil {
 		slog.Error("webauthn: create session", "error", err)
-		http.Error(w, `{"error":"internal error"}`, http.StatusInternalServerError)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.secure)
@@ -382,6 +416,48 @@ func (h *Handler) isTokenValid(r *http.Request, token string) bool {
 		}
 	}
 	return token == h.cfg.Onboarding.Token
+}
+
+func (h *Handler) clientIP(r *http.Request) string {
+	ip := localip.ClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), h.trusted)
+	if ip == nil {
+		return ""
+	}
+	return ip.String()
+}
+
+func (h *Handler) allowRequest(r *http.Request) bool {
+	ip := h.clientIP(r)
+	if ip == "" {
+		return true
+	}
+	now := time.Now()
+	h.rateMu.Lock()
+	defer h.rateMu.Unlock()
+	entry := h.rate[ip]
+	if entry == nil {
+		entry = &rateEntry{reset: now.Add(h.rateWindow)}
+		h.rate[ip] = entry
+	}
+	if now.Before(entry.blockedUntil) {
+		return false
+	}
+	if now.After(entry.reset) {
+		entry.count = 0
+		entry.reset = now.Add(h.rateWindow)
+	}
+	entry.count++
+	if entry.count > h.rateLimit {
+		entry.blockedUntil = now.Add(h.blockDuration)
+		return false
+	}
+	return true
+}
+
+func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
 func setSessionCookie(w http.ResponseWriter, name, value string, ttlDays int, secure bool) {

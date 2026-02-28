@@ -28,6 +28,7 @@ type Store struct {
 	path     string
 	ttl      time.Duration
 	stopCh   chan struct{}
+	lastSave time.Time
 }
 
 // sessionsFile is the JSON structure on disk.
@@ -76,18 +77,27 @@ func (s *Store) Create(userID string) (string, error) {
 
 // Get returns a session if it exists and is not expired, updating LastSeen.
 func (s *Store) Get(id string) *Session {
+	var needSave bool
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	sess, ok := s.sessions[id]
 	if !ok {
+		s.mu.Unlock()
 		return nil
 	}
 	created, err := time.Parse(time.RFC3339, sess.CreatedAt)
 	if err != nil || time.Since(created) > s.ttl {
 		delete(s.sessions, id)
+		s.mu.Unlock()
 		return nil
 	}
 	sess.LastSeen = time.Now().UTC().Format(time.RFC3339)
+	if time.Since(s.lastSave) > time.Minute {
+		needSave = true
+	}
+	s.mu.Unlock()
+	if needSave {
+		_ = s.save()
+	}
 	return sess
 }
 
@@ -133,7 +143,13 @@ func (s *Store) save() error {
 	if err != nil {
 		return fmt.Errorf("session: marshal: %w", err)
 	}
-	return atomicfile.Write(s.path, data, 0600)
+	if err := atomicfile.Write(s.path, data, 0600); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	s.lastSave = time.Now()
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *Store) prune() {

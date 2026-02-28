@@ -133,9 +133,24 @@ func Load(path string) (*Config, error) {
 
 // Save persists the config atomically.
 func (c *Config) Save() error {
+	data, err := c.snapshot()
+	if err != nil {
+		return err
+	}
+	return atomicfile.Write(c.path, data, 0600)
+}
+
+func (c *Config) snapshot() ([]byte, error) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
+	data, err := json.MarshalIndent(c, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("config: marshal: %w", err)
+	}
+	return data, nil
+}
 
+func (c *Config) saveLocked() error {
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return fmt.Errorf("config: marshal: %w", err)
@@ -159,12 +174,12 @@ func (c *Config) SessionFilePath() string {
 // AddUser adds a user and saves.
 func (c *Config) AddUser(u User) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if len(u.Credentials) > 0 && u.Credentials[0].CreatedAt == "" {
 		u.Credentials[0].CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
 	c.Users = append(c.Users, u)
-	c.mu.Unlock()
-	return c.Save()
+	return c.saveLocked()
 }
 
 // FindUserByCredentialID returns a user and credential index, or nil.
@@ -174,7 +189,7 @@ func (c *Config) FindUserByCredentialID(credID string) (*User, int) {
 	for i := range c.Users {
 		for j := range c.Users[i].Credentials {
 			if c.Users[i].Credentials[j].ID == credID {
-				return &c.Users[i], j
+				return cloneUser(&c.Users[i]), j
 			}
 		}
 	}
@@ -187,26 +202,34 @@ func (c *Config) FindUserByID(id string) *User {
 	defer c.mu.RUnlock()
 	for i := range c.Users {
 		if c.Users[i].ID == id {
-			return &c.Users[i]
+			return cloneUser(&c.Users[i])
 		}
 	}
 	return nil
 }
 
+func cloneUser(u *User) *User {
+	if u == nil {
+		return nil
+	}
+	clone := *u
+	clone.Credentials = append([]Credential(nil), u.Credentials...)
+	return &clone
+}
+
 // UpdateSignCount updates the sign count for a credential and saves.
 func (c *Config) UpdateSignCount(userID, credID string, count uint32) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	for i := range c.Users {
 		if c.Users[i].ID == userID {
 			for j := range c.Users[i].Credentials {
 				if c.Users[i].Credentials[j].ID == credID {
 					c.Users[i].Credentials[j].SignCount = count
-					c.mu.Unlock()
-					return c.Save()
+					return c.saveLocked()
 				}
 			}
 		}
 	}
-	c.mu.Unlock()
 	return nil
 }
