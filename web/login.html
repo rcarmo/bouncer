@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bouncer – Login</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #f5f5f5; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); padding: 2rem; max-width: 400px; width: 90%; text-align: center; }
+  h1 { font-size: 1.5rem; margin-bottom: 0.5rem; }
+  p { color: #666; margin-bottom: 1.5rem; }
+  button { background: #111; color: #fff; border: none; border-radius: 8px; padding: 0.75rem 1.5rem; font-size: 1rem; cursor: pointer; width: 100%; margin-bottom: 0.75rem; }
+  button:hover { background: #333; }
+  .error { color: #c00; margin-top: 1rem; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>🔐 Bouncer</h1>
+  <p>Sign in with your passkey</p>
+  <button id="login-btn">Sign in with Passkey</button>
+  <div id="error" class="error hidden"></div>
+</div>
+<script type="module">
+async function login() {
+  const errEl = document.getElementById('error');
+  errEl.classList.add('hidden');
+  try {
+    const optRes = await fetch('/webauthn/login/options', { method: 'POST' });
+    if (!optRes.ok) throw new Error(await optRes.text());
+    const { options, challengeId } = await optRes.json();
+
+    // Decode challenge and credential IDs from base64url.
+    options.publicKey.challenge = base64urlToBuffer(options.publicKey.challenge);
+    if (options.publicKey.allowCredentials) {
+      options.publicKey.allowCredentials = options.publicKey.allowCredentials.map(c => ({
+        ...c, id: base64urlToBuffer(c.id)
+      }));
+    }
+
+    const assertion = await navigator.credentials.get({ publicKey: options.publicKey });
+
+    const body = {
+      id: assertion.id,
+      rawId: bufferToBase64url(assertion.rawId),
+      type: assertion.type,
+      response: {
+        authenticatorData: bufferToBase64url(assertion.response.authenticatorData),
+        clientDataJSON: bufferToBase64url(assertion.response.clientDataJSON),
+        signature: bufferToBase64url(assertion.response.signature),
+        userHandle: assertion.response.userHandle ? bufferToBase64url(assertion.response.userHandle) : null,
+      },
+    };
+
+    const verRes = await fetch(`/webauthn/login/verify?challengeId=${challengeId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    if (!verRes.ok) throw new Error(await verRes.text());
+    window.location.href = '/';
+  } catch (e) {
+    errEl.textContent = e.message || 'Authentication failed';
+    errEl.classList.remove('hidden');
+  }
+}
+
+document.getElementById('login-btn').addEventListener('click', login);
+
+function base64urlToBuffer(b64url) {
+  const b64 = b64url.replace(/-/g, '+').replace(/_/g, '/');
+  const bin = atob(b64);
+  return Uint8Array.from(bin, c => c.charCodeAt(0)).buffer;
+}
+function bufferToBase64url(buf) {
+  const bytes = new Uint8Array(buf);
+  let b64 = btoa(String.fromCharCode(...bytes));
+  return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+</script>
+</body>
+</html>

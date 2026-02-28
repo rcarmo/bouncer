@@ -1,0 +1,25 @@
+# Binary
+bouncer
+
+# Runtime data
+bouncer.json
+sessions.json
+
+# Certificates
+*.pem
+*.cer
+*.mobileconfig
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage.out
