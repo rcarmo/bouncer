@@ -28,15 +28,23 @@ func New(backendURL string, trusted []*net.IPNet) (*httputil.ReverseProxy, error
 			if clientIP != nil && localip.IsTrustedProxy(clientIP, trusted) {
 				// Trusted proxy: preserve existing forwarded headers and append.
 				r.SetXForwarded()
-			} else if clientIP != nil {
-				// Direct or untrusted: set clean forwarded headers.
+				return
+			}
+
+			// Direct or untrusted: strip forwarded headers and set clean values.
+			r.Out.Header.Del("Forwarded")
+			r.Out.Header.Del("X-Forwarded-For")
+			r.Out.Header.Del("X-Forwarded-Host")
+			r.Out.Header.Del("X-Forwarded-Proto")
+
+			if clientIP != nil {
 				r.Out.Header.Set("X-Forwarded-For", clientIP.String())
-				r.Out.Header.Set("X-Forwarded-Host", r.In.Host)
-				if r.In.TLS != nil {
-					r.Out.Header.Set("X-Forwarded-Proto", "https")
-				} else {
-					r.Out.Header.Set("X-Forwarded-Proto", "http")
-				}
+			}
+			r.Out.Header.Set("X-Forwarded-Host", r.In.Host)
+			if r.In.TLS != nil {
+				r.Out.Header.Set("X-Forwarded-Proto", "https")
+			} else {
+				r.Out.Header.Set("X-Forwarded-Proto", "http")
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {

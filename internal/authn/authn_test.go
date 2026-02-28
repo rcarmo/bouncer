@@ -11,6 +11,7 @@ import (
 
 	"github.com/rcarmo/bouncer/internal/config"
 	"github.com/rcarmo/bouncer/internal/session"
+	"github.com/rcarmo/bouncer/internal/site"
 )
 
 func setupTestHandler(t *testing.T) (*Handler, *config.Config, *session.Store) {
@@ -34,7 +35,12 @@ func setupTestHandler(t *testing.T) (*Handler, *config.Config, *session.Store) {
 	}
 	t.Cleanup(sess.Stop)
 
-	h, err := New(cfg, sess, nil)
+	sites, err := site.New(cfg, nil)
+	if err != nil {
+		t.Fatalf("site.New: %v", err)
+	}
+
+	h, err := New(cfg, sess, nil, sites)
 	if err != nil {
 		t.Fatalf("authn.New: %v", err)
 	}
@@ -97,8 +103,9 @@ func TestRegisterOptionsValidToken(t *testing.T) {
 	h, _, _ := setupTestHandler(t)
 
 	body := `{"token":"123456","displayName":"Test","name":"test"}`
-	req := httptest.NewRequest("POST", "/webauthn/register/options", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "https://localhost/webauthn/register/options", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://localhost")
 	req.RemoteAddr = "8.8.8.8:1234"
 	rr := httptest.NewRecorder()
 	h.RegisterOptions(rr, req)
@@ -122,8 +129,9 @@ func TestRegisterOptionsLocalBypass(t *testing.T) {
 
 	// Empty token but from local IP.
 	body := `{"token":"","displayName":"Test","name":"test"}`
-	req := httptest.NewRequest("POST", "/webauthn/register/options", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "https://localhost/webauthn/register/options", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://localhost")
 	req.RemoteAddr = "192.168.1.1:1234" // Local IP.
 	rr := httptest.NewRecorder()
 	h.RegisterOptions(rr, req)
@@ -202,7 +210,8 @@ func TestRegisterVerifyExpiredChallenge(t *testing.T) {
 func TestLoginOptions(t *testing.T) {
 	h, _, _ := setupTestHandler(t)
 
-	req := httptest.NewRequest("POST", "/webauthn/login/options", nil)
+	req := httptest.NewRequest("POST", "https://localhost/webauthn/login/options", nil)
+	req.Header.Set("Origin", "https://localhost")
 	rr := httptest.NewRecorder()
 	h.LoginOptions(rr, req)
 
@@ -247,9 +256,10 @@ func TestLoginVerifyExpiredChallenge(t *testing.T) {
 func TestLogoutClearsCookie(t *testing.T) {
 	h, _, sess := setupTestHandler(t)
 
-	sessID, _ := sess.Create("user-1")
+	sessID, _ := sess.Create("default", "user-1")
 
-	req := httptest.NewRequest("POST", "/logout", nil)
+	req := httptest.NewRequest("POST", "https://localhost/logout", nil)
+	req.Header.Set("Origin", "https://localhost")
 	req.AddCookie(&http.Cookie{Name: "bouncer_session", Value: sessID})
 	rr := httptest.NewRecorder()
 	h.Logout(rr, req)
@@ -282,7 +292,8 @@ func TestLogoutClearsCookie(t *testing.T) {
 func TestLogoutWithoutCookie(t *testing.T) {
 	h, _, _ := setupTestHandler(t)
 
-	req := httptest.NewRequest("POST", "/logout", nil)
+	req := httptest.NewRequest("POST", "https://localhost/logout", nil)
+	req.Header.Set("Origin", "https://localhost")
 	rr := httptest.NewRecorder()
 	h.Logout(rr, req)
 

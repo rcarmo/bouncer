@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/rcarmo/bouncer/internal/authn"
 	"github.com/rcarmo/bouncer/internal/ca"
@@ -19,11 +20,20 @@ import (
 	"github.com/rcarmo/bouncer/internal/localip"
 	"github.com/rcarmo/bouncer/internal/proxy"
 	"github.com/rcarmo/bouncer/internal/session"
+	"github.com/rcarmo/bouncer/internal/site"
 	"github.com/rcarmo/bouncer/internal/token"
 	"github.com/rcarmo/bouncer/web"
 )
 
 var version = "dev"
+
+const (
+	readHeaderTimeout = 5 * time.Second
+	readTimeout       = 15 * time.Second
+	writeTimeout      = 30 * time.Second
+	idleTimeout       = 60 * time.Second
+	maxHeaderBytes    = 1 << 20
+)
 
 type stringSlice []string
 
@@ -70,17 +80,21 @@ func main() {
 	if listen != "" {
 		cfg.Server.Listen = listen
 	}
-	if backend != "" {
-		cfg.Server.Backend = backend
-	}
 	if cloudflare {
 		cfg.Server.Cloudflare = true
 	}
-	if len(hostnames) > 0 {
-		cfg.Server.Hostnames = hostnames
-	}
-	if len(ips) > 0 {
-		cfg.Server.IPAddresses = ips
+	if len(cfg.Sites) > 0 && (backend != "" || len(hostnames) > 0 || len(ips) > 0) {
+		slog.Warn("CLI overrides for backend/hostname/ip are ignored when sites[] is configured")
+	} else {
+		if backend != "" {
+			cfg.Server.Backend = backend
+		}
+		if len(hostnames) > 0 {
+			cfg.Server.Hostnames = hostnames
+		}
+		if len(ips) > 0 {
+			cfg.Server.IPAddresses = ips
+		}
 	}
 
 	// Onboarding mode.
@@ -100,6 +114,26 @@ func main() {
 		fmt.Printf("\n  Enrollment Token: %s\n\n", cfg.Onboarding.Token)
 	}
 
+	// Parse trusted proxies.
+	trustedNets, err := localip.ParseTrustedProxies(cfg.Server.TrustedProxies)
+	if err != nil {
+		slog.Error("failed to parse trusted proxies", "error", err)
+		os.Exit(1)
+	}
+
+	// Site registry.
+	siteRegistry, err := site.New(cfg, trustedNets)
+	if err != nil {
+		slog.Error("failed to initialize site registry", "error", err)
+		os.Exit(1)
+	}
+
+	// Aggregate SANs for all sites (local TLS only).
+	if !cfg.Server.Cloudflare {
+		cfg.Server.Hostnames = uniqueStrings(append(cfg.Server.Hostnames, siteRegistry.AllHostnames()...))
+		cfg.Server.IPAddresses = uniqueStrings(append(cfg.Server.IPAddresses, siteRegistry.AllIPs()...))
+	}
+
 	// TLS setup (skip in Cloudflare mode).
 	if !cfg.Server.Cloudflare {
 		if err := ca.EnsureCA(cfg); err != nil {
@@ -116,13 +150,6 @@ func main() {
 		)
 	}
 
-	// Parse trusted proxies.
-	trustedNets, err := localip.ParseTrustedProxies(cfg.Server.TrustedProxies)
-	if err != nil {
-		slog.Error("failed to parse trusted proxies", "error", err)
-		os.Exit(1)
-	}
-
 	// Session store.
 	sessStore, err := session.NewStore(cfg.SessionFilePath(), cfg.Session.TTLDays)
 	if err != nil {
@@ -132,17 +159,21 @@ func main() {
 	defer sessStore.Stop()
 
 	// WebAuthn handler.
-	authnHandler, err := authn.New(cfg, sessStore, trustedNets)
+	authnHandler, err := authn.New(cfg, sessStore, trustedNets, siteRegistry)
 	if err != nil {
 		slog.Error("failed to init webauthn", "error", err)
 		os.Exit(1)
 	}
 
-	// Reverse proxy.
-	rp, err := proxy.New(cfg.Server.Backend, trustedNets)
-	if err != nil {
-		slog.Error("failed to init proxy", "error", err)
-		os.Exit(1)
+	// Reverse proxies per site.
+	proxyBySite := make(map[string]http.Handler)
+	for _, s := range siteRegistry.Sites {
+		rp, err := proxy.New(s.Backend, trustedNets)
+		if err != nil {
+			slog.Error("failed to init proxy", "error", err, "site", s.ID)
+			os.Exit(1)
+		}
+		proxyBySite[s.ID] = rp
 	}
 
 	// Router.
@@ -157,11 +188,19 @@ func main() {
 
 	// UI routes.
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
+		if siteRegistry.Resolve(r) == nil {
+			http.NotFound(w, r)
+			return
+		}
 		data, _ := web.Static.ReadFile("login.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.Write(data)
 	})
 	mux.HandleFunc("GET /onboarding", func(w http.ResponseWriter, r *http.Request) {
+		if siteRegistry.Resolve(r) == nil {
+			http.NotFound(w, r)
+			return
+		}
 		if !cfg.Onboarding.Enabled {
 			http.Redirect(w, r, "/login", http.StatusFound)
 			return
@@ -210,12 +249,21 @@ func main() {
 
 	// All other routes: authenticated proxy.
 	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		siteCfg := siteRegistry.Resolve(r)
+		if siteCfg == nil {
+			http.NotFound(w, r)
+			return
+		}
 		// Check session.
 		cookie, err := r.Cookie(cfg.Session.CookieName)
 		if err == nil {
 			sess := sessStore.Get(cookie.Value)
-			if sess != nil {
-				rp.ServeHTTP(w, r)
+			if sess != nil && sess.SiteID == siteCfg.ID {
+				if rp, ok := proxyBySite[siteCfg.ID]; ok {
+					rp.ServeHTTP(w, r)
+					return
+				}
+				http.Error(w, "proxy not configured", http.StatusBadGateway)
 				return
 			}
 		}
@@ -231,7 +279,7 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	handler := withSecurityHeaders(mux)
+	handler := withSecurityHeaders(mux, trustedNets)
 
 	// Start server.
 	addr := cfg.Server.Listen
@@ -241,7 +289,15 @@ func main() {
 			addr = ":8080"
 		}
 		slog.Info("starting HTTP server (Cloudflare mode)", "addr", addr)
-		srv := &http.Server{Addr: addr, Handler: handler}
+		srv := &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
+			MaxHeaderBytes:    maxHeaderBytes,
+		}
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Error("server error", "error", err)
@@ -265,8 +321,13 @@ func main() {
 		}
 
 		server := &http.Server{
-			Addr:    addr,
-			Handler: handler,
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
+			MaxHeaderBytes:    maxHeaderBytes,
 			TLSConfig: &tls.Config{
 				Certificates: []tls.Certificate{tlsCert},
 				MinVersion:   tls.VersionTLS12,
@@ -307,19 +368,32 @@ func main() {
 				w.Write(der)
 			})
 			httpMux.HandleFunc("GET /onboarding", func(w http.ResponseWriter, r *http.Request) {
+				if siteRegistry.Resolve(r) == nil {
+					http.NotFound(w, r)
+					return
+				}
 				data, _ := web.Static.ReadFile("onboarding.html")
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
 				w.Write(data)
 			})
-			origin := cfg.Server.PublicOrigin
-			if origin == "" {
-				origin = "https://localhost"
-			}
 			httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				target := origin + r.URL.RequestURI()
+				siteCfg := siteRegistry.Resolve(r)
+				if siteCfg == nil || siteCfg.PublicOrigin == "" {
+					http.NotFound(w, r)
+					return
+				}
+				target := siteCfg.PublicOrigin + r.URL.RequestURI()
 				http.Redirect(w, r, target, http.StatusMovedPermanently)
 			})
-			httpSrv = &http.Server{Addr: httpAddr, Handler: withSecurityHeaders(httpMux)}
+			httpSrv = &http.Server{
+				Addr:              httpAddr,
+				Handler:           withSecurityHeaders(httpMux, trustedNets),
+				ReadHeaderTimeout: readHeaderTimeout,
+				ReadTimeout:       readTimeout,
+				WriteTimeout:      writeTimeout,
+				IdleTimeout:       idleTimeout,
+				MaxHeaderBytes:    maxHeaderBytes,
+			}
 			slog.Info("starting HTTP server (cert downloads)", "addr", httpAddr)
 			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 				slog.Warn("HTTP server error", "error", err)
@@ -347,14 +421,29 @@ func main() {
 	}
 }
 
-func withSecurityHeaders(next http.Handler) http.Handler {
+func withSecurityHeaders(next http.Handler, trusted []*net.IPNet) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Frame-Options", "DENY")
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+		if isHTTPSRequest(r, trusted) {
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+func isHTTPSRequest(r *http.Request, trusted []*net.IPNet) bool {
+	if r.TLS != nil {
+		return true
+	}
+	clientIP := localip.ExtractIP(r.RemoteAddr)
+	if clientIP != nil && localip.IsTrustedProxy(clientIP, trusted) {
+		return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	}
+	return false
 }
 
 func setupLogging(level string) {
@@ -370,4 +459,21 @@ func setupLogging(level string) {
 		lvl = slog.LevelInfo
 	}
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: lvl})))
+}
+
+func uniqueStrings(values []string) []string {
+	seen := make(map[string]struct{})
+	out := make([]string, 0, len(values))
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		key := strings.ToLower(v)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, v)
+	}
+	return out
 }

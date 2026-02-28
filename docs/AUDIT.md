@@ -6,6 +6,38 @@
 
 ---
 
+## Follow-up Security Audit (Claude Opus 4.6)
+
+**Date:** 2026-02-28
+
+Additional hardening applied after multi-site support:
+
+- Enforced strict `Origin` validation for WebAuthn + logout endpoints to mitigate CSRF.
+- Bound sessions to resolved `site` IDs to prevent cross-site reuse in multi-site mode.
+- Made Secure cookie behavior request-aware (HTTPS or trusted proxy `X-Forwarded-Proto: https`).
+- Added HSTS and tightened security headers (CSP `frame-ancestors`, `base-uri`, `form-action`, `Permissions-Policy`).
+- Sanitized `Forwarded`/`X-Forwarded-*` headers for untrusted sources in the reverse proxy.
+- Bound registration challenges to original user values (user ID + display name/name) to prevent tampering.
+- Added cleanup for rate-limit state to avoid unbounded growth.
+
+**Status:** All findings in this section have been addressed in code.
+
+---
+
+## Follow-up Security Audit (GPT-5.2-Codex)
+
+**Date:** 2026-02-28
+
+Additional hardening applied:
+
+- Added HTTP server timeouts and max header size to mitigate slowloris and resource exhaustion.
+- Marked all WebAuthn and logout responses as `Cache-Control: no-store`.
+- Removed user PII from registration verification query parameters in the onboarding UI.
+
+**Status:** All findings in this section have been addressed in code.
+
+---
+
 ## Executive Summary
 
 The project is well-structured, compiles cleanly, and has solid test coverage on core packages. The overall architecture is sound. I found **4 security issues** (2 high, 2 medium), **6 correctness bugs**, and **8 robustness/quality improvements**. None are show-stoppers, but several should be fixed before any real-world use.

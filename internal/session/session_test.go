@@ -17,7 +17,7 @@ func TestCreateAndGet(t *testing.T) {
 	}
 	defer store.Stop()
 
-	id, err := store.Create("user-1")
+	id, err := store.Create("default", "user-1")
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
@@ -31,6 +31,9 @@ func TestCreateAndGet(t *testing.T) {
 	}
 	if sess.UserID != "user-1" {
 		t.Errorf("expected user-1, got %s", sess.UserID)
+	}
+	if sess.SiteID != "default" {
+		t.Errorf("expected site default, got %s", sess.SiteID)
 	}
 }
 
@@ -53,7 +56,7 @@ func TestDelete(t *testing.T) {
 	store, _ := NewStore(path, 7)
 	defer store.Stop()
 
-	id, _ := store.Create("user-1")
+	id, _ := store.Create("default", "user-1")
 	store.Delete(id)
 
 	if store.Get(id) != nil {
@@ -69,7 +72,7 @@ func TestTTLExpiry(t *testing.T) {
 	store, _ := NewStore(path, 0)
 	defer store.Stop()
 
-	id, _ := store.Create("user-1")
+	id, _ := store.Create("default", "user-1")
 	// Wait a tiny bit so the session is in the past.
 	time.Sleep(10 * time.Millisecond)
 
@@ -83,7 +86,7 @@ func TestPersistAndReload(t *testing.T) {
 	path := filepath.Join(dir, "sessions.json")
 
 	store1, _ := NewStore(path, 7)
-	id, _ := store1.Create("user-1")
+	id, _ := store1.Create("default", "user-1")
 	store1.Stop()
 
 	// Reload from disk.
@@ -100,6 +103,9 @@ func TestPersistAndReload(t *testing.T) {
 	if sess.UserID != "user-1" {
 		t.Errorf("expected user-1, got %s", sess.UserID)
 	}
+	if sess.SiteID != "default" {
+		t.Errorf("expected site default, got %s", sess.SiteID)
+	}
 }
 
 func TestMultipleSessions(t *testing.T) {
@@ -109,9 +115,9 @@ func TestMultipleSessions(t *testing.T) {
 	store, _ := NewStore(path, 7)
 	defer store.Stop()
 
-	id1, _ := store.Create("user-1")
-	id2, _ := store.Create("user-2")
-	id3, _ := store.Create("user-3")
+	id1, _ := store.Create("default", "user-1")
+	id2, _ := store.Create("default", "user-2")
+	id3, _ := store.Create("default", "user-3")
 
 	if id1 == id2 || id2 == id3 || id1 == id3 {
 		t.Error("session IDs should be unique")
@@ -129,8 +135,8 @@ func TestDeleteDoesNotAffectOthers(t *testing.T) {
 	store, _ := NewStore(path, 7)
 	defer store.Stop()
 
-	id1, _ := store.Create("user-1")
-	id2, _ := store.Create("user-2")
+	id1, _ := store.Create("default", "user-1")
+	id2, _ := store.Create("default", "user-2")
 	store.Delete(id1)
 
 	if store.Get(id1) != nil {
@@ -148,7 +154,7 @@ func TestGetUpdatesLastSeen(t *testing.T) {
 	store, _ := NewStore(path, 7)
 	defer store.Stop()
 
-	id, _ := store.Create("user-1")
+	id, _ := store.Create("default", "user-1")
 	sess1 := store.Get(id)
 	firstSeen := sess1.LastSeen
 
@@ -165,7 +171,7 @@ func TestPersistFilePermissions(t *testing.T) {
 	path := filepath.Join(dir, "sessions.json")
 
 	store, _ := NewStore(path, 7)
-	store.Create("user-1")
+	store.Create("default", "user-1")
 	store.Stop()
 
 	info, err := os.Stat(path)
@@ -185,8 +191,8 @@ func TestPruneRemovesExpired(t *testing.T) {
 	store, _ := NewStore(path, 0)
 	defer store.Stop()
 
-	store.Create("user-1")
-	store.Create("user-2")
+	store.Create("default", "user-1")
+	store.Create("default", "user-2")
 	time.Sleep(10 * time.Millisecond)
 
 	store.prune()

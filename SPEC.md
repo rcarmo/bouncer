@@ -1,7 +1,7 @@
 # Bouncer Spec
 
 ## Overview
-Bouncer is a Go-based reverse proxy that protects a backend HTTP service using WebAuthn (passkeys). It supports an **onboarding mode** to help users install trust (via iOS/macOS profiles) and register passkeys, then transparently forwards authenticated users to the backend service.
+Bouncer is a Go-based reverse proxy that protects backend HTTP services using WebAuthn (passkeys). It supports **single-site** and **multi-site** (host-based) routing, with an **onboarding mode** to help users install trust (via iOS/macOS profiles) and register passkeys, then transparently forwards authenticated users to the backend service.
 
 Configuration and user data live in a **single JSON file**. Sessions are persisted in a **separate JSON file** with a configurable TTL. A CLI switch enables onboarding mode.
 
@@ -10,6 +10,7 @@ Configuration and user data live in a **single JSON file**. Sessions are persist
 - Onboarding flow for iOS/macOS trust + passkey registration.
 - Transparent pass-through once authenticated (no app changes required).
 - Single JSON file for config + user DB.
+- **Multi-site host-based routing** (one instance, multiple public origins/backends).
 - Optional **simplified mode** via Cloudflare Tunnel (no local TLS or profiles).
 
 ## Non‑Goals
@@ -79,6 +80,8 @@ Flags:
   --onboarding            Enable onboarding mode (allow registration)
   --cloudflare            Enable Cloudflare Tunnel mode (no local TLS/profile flow)
   --log-level <level>     info|debug|warn|error
+
+Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in single-site mode. When `sites` is configured, these flags are ignored.
 ```
 
 ---
@@ -109,6 +112,24 @@ Flags:
     },
     "cloudflare": false
   },
+  "sites": [
+    {
+      "id": "app-a",
+      "publicOrigin": "https://a.example.com",
+      "rpID": "a.example.com",
+      "backend": "http://127.0.0.1:3001",
+      "hostnames": ["a.example.com"],
+      "ipAddresses": ["192.168.1.10"]
+    },
+    {
+      "id": "app-b",
+      "publicOrigin": "https://b.example.com",
+      "rpID": "b.example.com",
+      "backend": "http://127.0.0.1:3002",
+      "hostnames": ["b.example.com"],
+      "ipAddresses": ["192.168.1.11"]
+    }
+  ],
   "session": {
     "ttlDays": 7,
     "cookieName": "bouncer_session",
@@ -131,6 +152,7 @@ Flags:
   "users": [
     {
       "id": "user-1",
+      "site": "app-a",
       "displayName": "Alice",
       "name": "alice@example.com",
       "credentials": [
@@ -153,11 +175,12 @@ Flags:
 - `hostnames`/`ipAddresses` define TLS SANs; they can be set in config or overridden via CLI.
 - `trustedProxies`: CIDR list. `X-Forwarded-*` headers are only trusted from these IPs. Empty = trust nothing (direct mode). Set to Cloudflare ranges when using `--cloudflare`.
 - In Cloudflare mode, `tls` may be omitted.
+- If `sites` is set, each site defines its own `publicOrigin`, `rpID`, and `backend`. CLI overrides for `--backend`, `--hostname`, and `--ip` are ignored in multi-site mode.
 - `session.ttlDays`: sessions expire after this many days (default 7); user must re‑authenticate with passkey.
 - `session.file`: path to the sessions JSON file (default `sessions.json`, relative to config dir).
 - `onboarding.rotateTokenOnStart`: if `true`, a new 6‑digit token is generated on each startup (old token discarded).
 - `onboarding.localBypass`: if `true`, requests from RFC1918 + loopback IPs skip the token requirement.
-- `users` holds registered WebAuthn credentials.
+- `users` holds registered WebAuthn credentials. In multi-site mode, each user is tagged with `site` (defaults to `default` for legacy entries).
 
 ---
 
@@ -185,7 +208,7 @@ Flags:
 ### Session
 - Cookie: `bouncer_session` (httpOnly, secure, SameSite=Lax).
 - **Persisted** in a separate `sessions.json` file (configurable path).
-- Each session record stores: session ID, user ID, creation time, last‑seen time.
+- Each session record stores: session ID, site ID, user ID, creation time, last‑seen time.
 - **TTL**: sessions expire after `session.ttlDays` (default **7 days**) from creation. Expired sessions require a fresh passkey login.
 - Cleanup: expired sessions are pruned on startup and periodically (e.g., hourly).
 - Atomic writes: write to temp file, fsync, rename (same strategy as `bouncer.json`).
@@ -219,6 +242,7 @@ Flags:
 - Preserve method, headers, body, query string.
 - Add standard proxy headers:
   - `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`.
+- In multi-site mode, route by `Host` (or `X-Forwarded-Host` from trusted proxies).
 - Optional allowlist of headers to strip (e.g., `Authorization`).
 
 ---
@@ -324,6 +348,11 @@ Flags:
 - Require same-origin for WebAuthn endpoints.
 - Validate `Origin` and `RP ID` strictly; in Cloudflare mode these must match the tunnel hostname.
 - Rate limit WebAuthn attempts (basic IP-based throttling).
+- Sessions are bound to the resolved `site` to prevent cross-site reuse.
+- Session cookies are marked `Secure` when the request is HTTPS or when a trusted proxy reports `X-Forwarded-Proto: https`.
+- HSTS is emitted on HTTPS responses.
+- WebAuthn responses use `Cache-Control: no-store`.
+- HTTP servers enforce sane timeouts and max header size to mitigate slowloris-style attacks.
 - Protect `bouncer.json` and `sessions.json` with restrictive file permissions (0600).
 - Enrollment token is **6 digits**, generated via `crypto/rand`.
 - Token is **printed to stdout/proxy logs** when onboarding is active; never exposed via API.

@@ -15,6 +15,7 @@ import (
 // Config is the top-level bouncer.json structure.
 type Config struct {
 	Server     ServerConfig     `json:"server"`
+	Sites      []SiteConfig     `json:"sites,omitempty"`
 	Session    SessionConfig    `json:"session"`
 	Onboarding OnboardingConfig `json:"onboarding"`
 	Users      []User           `json:"users"`
@@ -33,6 +34,16 @@ type ServerConfig struct {
 	TrustedProxies []string  `json:"trustedProxies"`
 	TLS            TLSConfig `json:"tls"`
 	Cloudflare     bool      `json:"cloudflare"`
+}
+
+// SiteConfig defines a single public site and its backend.
+type SiteConfig struct {
+	ID           string   `json:"id"`
+	PublicOrigin string   `json:"publicOrigin"`
+	RPID         string   `json:"rpID"`
+	Backend      string   `json:"backend"`
+	Hostnames    []string `json:"hostnames"`
+	IPAddresses  []string `json:"ipAddresses"`
 }
 
 type TLSConfig struct {
@@ -65,6 +76,7 @@ type OnboardingConfig struct {
 
 type User struct {
 	ID          string       `json:"id"`
+	SiteID      string       `json:"site,omitempty"`
 	DisplayName string       `json:"displayName"`
 	Name        string       `json:"name"`
 	Credentials []Credential `json:"credentials"`
@@ -183,10 +195,14 @@ func (c *Config) AddUser(u User) error {
 }
 
 // FindUserByCredentialID returns a user and credential index, or nil.
-func (c *Config) FindUserByCredentialID(credID string) (*User, int) {
+func (c *Config) FindUserByCredentialID(siteID, credID string) (*User, int) {
+	siteID = normalizeSiteID(siteID)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for i := range c.Users {
+		if normalizeSiteID(c.Users[i].SiteID) != siteID {
+			continue
+		}
 		for j := range c.Users[i].Credentials {
 			if c.Users[i].Credentials[j].ID == credID {
 				return cloneUser(&c.Users[i]), j
@@ -197,11 +213,12 @@ func (c *Config) FindUserByCredentialID(credID string) (*User, int) {
 }
 
 // FindUserByID returns a user by ID.
-func (c *Config) FindUserByID(id string) *User {
+func (c *Config) FindUserByID(siteID, id string) *User {
+	siteID = normalizeSiteID(siteID)
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	for i := range c.Users {
-		if c.Users[i].ID == id {
+		if normalizeSiteID(c.Users[i].SiteID) == siteID && c.Users[i].ID == id {
 			return cloneUser(&c.Users[i])
 		}
 	}
@@ -217,12 +234,20 @@ func cloneUser(u *User) *User {
 	return &clone
 }
 
+func normalizeSiteID(id string) string {
+	if id == "" {
+		return "default"
+	}
+	return id
+}
+
 // UpdateSignCount updates the sign count for a credential and saves.
-func (c *Config) UpdateSignCount(userID, credID string, count uint32) error {
+func (c *Config) UpdateSignCount(siteID, userID, credID string, count uint32) error {
+	siteID = normalizeSiteID(siteID)
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	for i := range c.Users {
-		if c.Users[i].ID == userID {
+		if normalizeSiteID(c.Users[i].SiteID) == siteID && c.Users[i].ID == userID {
 			for j := range c.Users[i].Credentials {
 				if c.Users[i].Credentials[j].ID == credID {
 					c.Users[i].Credentials[j].SignCount = count

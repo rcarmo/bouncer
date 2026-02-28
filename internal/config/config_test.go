@@ -95,6 +95,7 @@ func TestAddUserAndFind(t *testing.T) {
 	cfg, _ := Load(path)
 	u := User{
 		ID:          "u1",
+		SiteID:      "default",
 		DisplayName: "Alice",
 		Name:        "alice",
 		Credentials: []Credential{
@@ -108,7 +109,7 @@ func TestAddUserAndFind(t *testing.T) {
 		t.Fatalf("expected 1 user, got %d", len(cfg.Users))
 	}
 
-	found := cfg.FindUserByID("u1")
+	found := cfg.FindUserByID("default", "u1")
 	if found == nil {
 		t.Fatal("FindUserByID returned nil")
 	}
@@ -116,7 +117,7 @@ func TestAddUserAndFind(t *testing.T) {
 		t.Errorf("expected Alice, got %s", found.DisplayName)
 	}
 
-	found2, idx := cfg.FindUserByCredentialID("cred1")
+	found2, idx := cfg.FindUserByCredentialID("default", "cred1")
 	if found2 == nil || idx != 0 {
 		t.Fatalf("FindUserByCredentialID: user=%v, idx=%d", found2, idx)
 	}
@@ -128,15 +129,15 @@ func TestUpdateSignCount(t *testing.T) {
 
 	cfg, _ := Load(path)
 	cfg.AddUser(User{
-		ID: "u1", DisplayName: "A", Name: "a",
+		ID: "u1", SiteID: "default", DisplayName: "A", Name: "a",
 		Credentials: []Credential{{ID: "c1", SignCount: 0}},
 	})
 
-	if err := cfg.UpdateSignCount("u1", "c1", 5); err != nil {
+	if err := cfg.UpdateSignCount("default", "u1", "c1", 5); err != nil {
 		t.Fatalf("UpdateSignCount: %v", err)
 	}
 
-	u, _ := cfg.FindUserByCredentialID("c1")
+	u, _ := cfg.FindUserByCredentialID("default", "c1")
 	if u.Credentials[0].SignCount != 5 {
 		t.Errorf("expected sign count 5, got %d", u.Credentials[0].SignCount)
 	}

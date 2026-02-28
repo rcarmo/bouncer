@@ -12,6 +12,7 @@ A Go-based reverse proxy that protects backend HTTP services with [WebAuthn](htt
 - **6-digit enrollment token** — printed to stdout, with local-IP bypass
 - **Transparent reverse proxy** — authenticated users are forwarded to the backend seamlessly
 - **Static binary** — single Go binary, Docker-ready
+- **Multi-site support** — host-based routing to multiple backends in one instance
 
 ## Quick Start
 
@@ -70,7 +71,65 @@ Flags:
 
 Sessions expire after 7 days (configurable) and are persisted across restarts.
 
+## Security Notes
+
+- WebAuthn endpoints enforce **same-origin** requests.
+- Sessions are **bound to the resolved site** in multi-site mode.
+- Session cookies are marked **Secure** when requests are HTTPS (or forwarded HTTPS via trusted proxies).
+- HSTS is emitted for HTTPS responses.
+- WebAuthn responses are **no-store** and servers use **read/write timeouts** to mitigate slowloris attacks.
+
 ## Configuration
+
+### Single-site (default)
+
+```json
+{
+  "server": {
+    "listen": ":443",
+    "publicOrigin": "https://bouncer.example.com",
+    "rpID": "bouncer.example.com",
+    "backend": "http://127.0.0.1:3000",
+    "hostnames": ["bouncer.example.com"],
+    "ipAddresses": ["192.168.1.50"]
+  }
+}
+```
+
+### Multi-site (host-based routing)
+
+```json
+{
+  "server": {
+    "listen": ":443",
+    "cloudflare": false,
+    "trustedProxies": []
+  },
+  "sites": [
+    {
+      "id": "app-a",
+      "publicOrigin": "https://a.example.com",
+      "rpID": "a.example.com",
+      "backend": "http://127.0.0.1:3001",
+      "hostnames": ["a.example.com"],
+      "ipAddresses": ["192.168.1.10"]
+    },
+    {
+      "id": "app-b",
+      "publicOrigin": "https://b.example.com",
+      "rpID": "b.example.com",
+      "backend": "http://127.0.0.1:3002",
+      "hostnames": ["b.example.com"],
+      "ipAddresses": ["192.168.1.11"]
+    }
+  ]
+}
+```
+
+Notes:
+- If `sites` is present, **CLI overrides** for `--backend`, `--hostname`, and `--ip` are ignored.
+- In local TLS mode, Bouncer **aggregates SANs** from all sites when generating the server certificate.
+- In Cloudflare mode, set `publicOrigin`/`rpID` per site to the Cloudflare hostname.
 
 See [SPEC.md](SPEC.md) for the full JSON schema and configuration reference.
 

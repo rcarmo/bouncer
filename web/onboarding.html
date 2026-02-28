@@ -114,7 +114,7 @@ async function register() {
       },
     };
 
-    const verRes = await fetch(`/webauthn/register/verify?challengeId=${challengeId}&userId=${userId}&displayName=${encodeURIComponent(dn)}&name=${encodeURIComponent(n)}`, {
+    const verRes = await fetch(`/webauthn/register/verify?challengeId=${challengeId}`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),

@@ -16,6 +16,7 @@ import (
 // Session represents a single authenticated session.
 type Session struct {
 	ID        string `json:"id"`
+	SiteID    string `json:"site"`
 	UserID    string `json:"userId"`
 	CreatedAt string `json:"createdAt"`
 	LastSeen  string `json:"lastSeen"`
@@ -53,15 +54,19 @@ func NewStore(path string, ttlDays int) (*Store, error) {
 	return s, nil
 }
 
-// Create creates a new session for the given user and returns the session ID.
-func (s *Store) Create(userID string) (string, error) {
+// Create creates a new session for the given site/user and returns the session ID.
+func (s *Store) Create(siteID, userID string) (string, error) {
 	id, err := randomSessionID()
 	if err != nil {
 		return "", err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
+	if siteID == "" {
+		siteID = "default"
+	}
 	sess := &Session{
 		ID:        id,
+		SiteID:    siteID,
 		UserID:    userID,
 		CreatedAt: now,
 		LastSeen:  now,
@@ -127,6 +132,9 @@ func (s *Store) load() error {
 		return fmt.Errorf("session: parse: %w", err)
 	}
 	for _, sess := range f.Sessions {
+		if sess.SiteID == "" {
+			sess.SiteID = "default"
+		}
 		s.sessions[sess.ID] = sess
 	}
 	return nil

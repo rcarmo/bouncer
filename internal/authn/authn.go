@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -19,15 +21,16 @@ import (
 	"github.com/rcarmo/bouncer/internal/config"
 	"github.com/rcarmo/bouncer/internal/localip"
 	"github.com/rcarmo/bouncer/internal/session"
+	"github.com/rcarmo/bouncer/internal/site"
 )
 
 // Handler holds WebAuthn state and HTTP handlers.
 type Handler struct {
-	wan     *webauthn.WebAuthn
-	cfg     *config.Config
-	sess    *session.Store
-	trusted []*net.IPNet
-	secure  bool // whether to set Secure flag on cookies
+	wanBySite map[string]*webauthn.WebAuthn
+	sites     *site.Registry
+	cfg       *config.Config
+	sess      *session.Store
+	trusted   []*net.IPNet
 
 	// In-flight challenges keyed by a random challenge ID.
 	mu         sync.Mutex
@@ -43,8 +46,12 @@ type Handler struct {
 
 // challengeEntry stores a challenge with its expiry time.
 type challengeEntry struct {
-	data    *webauthn.SessionData
-	expires time.Time
+	data        *webauthn.SessionData
+	expires     time.Time
+	siteID      string
+	userID      string
+	displayName string
+	name        string
 }
 
 // rateEntry tracks request counts per IP.
@@ -52,28 +59,41 @@ type rateEntry struct {
 	count        int
 	reset        time.Time
 	blockedUntil time.Time
+	lastSeen     time.Time
 }
 
+const (
+	maxBodyBytes = 1 << 20 // 1 MiB
+	maxNameLen   = 128
+)
+
 // New creates a new WebAuthn handler.
-func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet) (*Handler, error) {
-	wan, err := webauthn.New(&webauthn.Config{
-		RPID:          cfg.Server.RPID,
-		RPDisplayName: "Bouncer",
-		RPOrigins:     []string{cfg.Server.PublicOrigin},
-	})
-	if err != nil {
-		return nil, fmt.Errorf("authn: init webauthn: %w", err)
+func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *site.Registry) (*Handler, error) {
+	if sites == nil {
+		return nil, fmt.Errorf("authn: sites registry is nil")
+	}
+	wanBySite := make(map[string]*webauthn.WebAuthn)
+	for _, s := range sites.Sites {
+		wan, err := webauthn.New(&webauthn.Config{
+			RPID:          s.RPID,
+			RPDisplayName: "Bouncer",
+			RPOrigins:     []string{s.PublicOrigin},
+		})
+		if err != nil {
+			return nil, fmt.Errorf("authn: init webauthn for site %q: %w", s.ID, err)
+		}
+		wanBySite[s.ID] = wan
 	}
 	h := &Handler{
-		wan:        wan,
-		cfg:        cfg,
-		sess:       sess,
-		trusted:    trusted,
-		secure:     !cfg.Server.Cloudflare,
-		challenges: make(map[string]*challengeEntry),
-		rate:       make(map[string]*rateEntry),
-		rateLimit:  20,
-		rateWindow: time.Minute,
+		wanBySite:     wanBySite,
+		sites:         sites,
+		cfg:           cfg,
+		sess:          sess,
+		trusted:       trusted,
+		challenges:    make(map[string]*challengeEntry),
+		rate:          make(map[string]*rateEntry),
+		rateLimit:     20,
+		rateWindow:    time.Minute,
 		blockDuration: 5 * time.Minute,
 	}
 	// Start challenge cleanup goroutine.
@@ -126,6 +146,7 @@ func (u *webauthnUser) WebAuthnIcon() string { return "" }
 
 // RegisterOptions handles POST /webauthn/register/options.
 func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
 	if !h.cfg.Onboarding.Enabled {
 		writeJSONError(w, http.StatusForbidden, "registration disabled")
 		return
@@ -141,13 +162,29 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"displayName"`
 		Name        string `json:"name"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if len(req.DisplayName) > maxNameLen || len(req.Name) > maxNameLen {
+		writeJSONError(w, http.StatusBadRequest, "input too long")
 		return
 	}
 
 	if !h.isTokenValid(r, req.Token) {
 		writeJSONError(w, http.StatusForbidden, "invalid token")
+		return
+	}
+
+	// Resolve site.
+	siteCfg, wan, err := h.siteForRequest(r)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "unknown site")
+		return
+	}
+	if !h.validOrigin(r, siteCfg) {
+		writeJSONError(w, http.StatusForbidden, "invalid origin")
 		return
 	}
 
@@ -162,12 +199,13 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 	tmpUser := &webauthnUser{
 		user: &config.User{
 			ID:          userID,
+			SiteID:      siteCfg.ID,
 			DisplayName: req.DisplayName,
 			Name:        req.Name,
 		},
 	}
 
-	options, sessionData, err := h.wan.BeginRegistration(tmpUser)
+	options, sessionData, err := wan.BeginRegistration(tmpUser)
 	if err != nil {
 		slog.Error("webauthn: begin registration", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
@@ -178,8 +216,12 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 	challengeID := randomChallengeID()
 	h.mu.Lock()
 	h.challenges[challengeID] = &challengeEntry{
-		data:    sessionData,
-		expires: time.Now().Add(5 * time.Minute),
+		data:        sessionData,
+		expires:     time.Now().Add(5 * time.Minute),
+		siteID:      siteCfg.ID,
+		userID:      userID,
+		displayName: req.DisplayName,
+		name:        req.Name,
 	}
 	h.mu.Unlock()
 
@@ -196,6 +238,7 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 
 // RegisterVerify handles POST /webauthn/register/verify.
 func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
 	if !h.cfg.Onboarding.Enabled {
 		writeJSONError(w, http.StatusForbidden, "registration disabled")
 		return
@@ -204,6 +247,8 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited")
 		return
 	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 
 	var req struct {
 		ChallengeID string `json:"challengeId"`
@@ -214,8 +259,6 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	// Parse challengeId from query or a wrapper; the credential is in the body.
 	challengeID := r.URL.Query().Get("challengeId")
 	userID := r.URL.Query().Get("userId")
-	displayName := r.URL.Query().Get("displayName")
-	name := r.URL.Query().Get("name")
 	if challengeID == "" {
 		// Try parsing a wrapper object.
 		// For simplicity, require query params.
@@ -235,15 +278,40 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	siteCfg := h.sites.Resolve(r)
+	if siteCfg == nil || siteCfg.ID != entry.siteID {
+		writeJSONError(w, http.StatusNotFound, "unknown site")
+		return
+	}
+	if !h.validOrigin(r, siteCfg) {
+		writeJSONError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
+	if entry.userID == "" || string(entry.data.UserID) != entry.userID {
+		writeJSONError(w, http.StatusBadRequest, "invalid challenge")
+		return
+	}
+	if userID != "" && userID != entry.userID {
+		writeJSONError(w, http.StatusBadRequest, "invalid user")
+		return
+	}
+
+	wan, ok := h.wanBySite[entry.siteID]
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "invalid site")
+		return
+	}
+
 	tmpUser := &webauthnUser{
 		user: &config.User{
-			ID:          userID,
-			DisplayName: displayName,
-			Name:        name,
+			ID:          entry.userID,
+			SiteID:      entry.siteID,
+			DisplayName: entry.displayName,
+			Name:        entry.name,
 		},
 	}
 
-	credential, err := h.wan.FinishRegistration(tmpUser, *entry.data, r)
+	credential, err := wan.FinishRegistration(tmpUser, *entry.data, r)
 	if err != nil {
 		slog.Error("webauthn: finish registration", "error", err)
 		writeJSONError(w, http.StatusBadRequest, "verification failed")
@@ -258,9 +326,10 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 
 	// Save user + credential.
 	newUser := config.User{
-		ID:          userID,
-		DisplayName: displayName,
-		Name:        name,
+		ID:          entry.userID,
+		SiteID:      entry.siteID,
+		DisplayName: entry.displayName,
+		Name:        entry.name,
 		Credentials: []config.Credential{
 			{
 				ID:         base64.RawURLEncoding.EncodeToString(credential.ID),
@@ -278,26 +347,38 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create session.
-	sessID, err := h.sess.Create(userID)
+	sessID, err := h.sess.Create(entry.siteID, entry.userID)
 	if err != nil {
 		slog.Error("webauthn: create session", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
 
-	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.secure)
+	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.cookieSecure(r))
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
 // LoginOptions handles POST /webauthn/login/options.
 func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
 	if !h.allowRequest(r) {
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited")
 		return
 	}
+	// Resolve site.
+	siteCfg, wan, err := h.siteForRequest(r)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "unknown site")
+		return
+	}
+	if !h.validOrigin(r, siteCfg) {
+		writeJSONError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
+
 	// Discoverable credential flow: no user specified.
-	options, sessionData, err := h.wan.BeginDiscoverableLogin()
+	options, sessionData, err := wan.BeginDiscoverableLogin()
 	if err != nil {
 		slog.Error("webauthn: begin login", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
@@ -309,6 +390,7 @@ func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
 	h.challenges[challengeID] = &challengeEntry{
 		data:    sessionData,
 		expires: time.Now().Add(5 * time.Minute),
+		siteID:  siteCfg.ID,
 	}
 	h.mu.Unlock()
 
@@ -322,10 +404,12 @@ func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
 
 // LoginVerify handles POST /webauthn/login/verify.
 func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
 	if !h.allowRequest(r) {
 		writeJSONError(w, http.StatusTooManyRequests, "rate limited")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
 	challengeID := r.URL.Query().Get("challengeId")
 	if challengeID == "" {
 		writeJSONError(w, http.StatusBadRequest, "missing challengeId")
@@ -343,13 +427,29 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	siteCfg := h.sites.Resolve(r)
+	if siteCfg == nil || siteCfg.ID != entry.siteID {
+		writeJSONError(w, http.StatusNotFound, "unknown site")
+		return
+	}
+	if !h.validOrigin(r, siteCfg) {
+		writeJSONError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
+
+	wan, ok := h.wanBySite[entry.siteID]
+	if !ok {
+		writeJSONError(w, http.StatusInternalServerError, "invalid site")
+		return
+	}
+
 	// Discoverable login handler that looks up user by credential ID.
 	userHandler := func(rawID, userHandle []byte) (webauthn.User, error) {
 		credIDStr := base64.RawURLEncoding.EncodeToString(rawID)
-		user, _ := h.cfg.FindUserByCredentialID(credIDStr)
+		user, _ := h.cfg.FindUserByCredentialID(entry.siteID, credIDStr)
 		if user == nil {
 			// Try userHandle (which is WebAuthnID = user.ID).
-			user = h.cfg.FindUserByID(string(userHandle))
+			user = h.cfg.FindUserByID(entry.siteID, string(userHandle))
 		}
 		if user == nil {
 			return nil, fmt.Errorf("user not found")
@@ -357,7 +457,7 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 		return &webauthnUser{user: user}, nil
 	}
 
-	credential, err := h.wan.FinishDiscoverableLogin(userHandler, *entry.data, r)
+	credential, err := wan.FinishDiscoverableLogin(userHandler, *entry.data, r)
 	if err != nil {
 		slog.Error("webauthn: finish login", "error", err)
 		writeJSONError(w, http.StatusUnauthorized, "authentication failed")
@@ -366,22 +466,22 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 
 	// Find user by credential to update sign count.
 	credIDStr := base64.RawURLEncoding.EncodeToString(credential.ID)
-	user, _ := h.cfg.FindUserByCredentialID(credIDStr)
+	user, _ := h.cfg.FindUserByCredentialID(entry.siteID, credIDStr)
 	if user == nil {
 		slog.Error("webauthn: user not found after login", "credentialID", credIDStr)
 		writeJSONError(w, http.StatusInternalServerError, "user not found")
 		return
 	}
 
-	_ = h.cfg.UpdateSignCount(user.ID, credIDStr, credential.Authenticator.SignCount)
+	_ = h.cfg.UpdateSignCount(entry.siteID, user.ID, credIDStr, credential.Authenticator.SignCount)
 
-	sessID, err := h.sess.Create(user.ID)
+	sessID, err := h.sess.Create(entry.siteID, user.ID)
 	if err != nil {
 		slog.Error("webauthn: create session", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.secure)
+	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.cookieSecure(r))
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
@@ -389,6 +489,16 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 
 // Logout handles POST /logout.
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
+	setNoStore(w)
+	siteCfg := h.sites.Resolve(r)
+	if siteCfg == nil {
+		writeJSONError(w, http.StatusNotFound, "unknown site")
+		return
+	}
+	if !h.validOrigin(r, siteCfg) {
+		writeJSONError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
 	cookie, err := r.Cookie(h.cfg.Session.CookieName)
 	if err == nil {
 		h.sess.Delete(cookie.Value)
@@ -399,7 +509,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
-		Secure:   h.secure,
+		Secure:   h.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 	w.Header().Set("Content-Type", "application/json")
@@ -410,7 +520,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) isTokenValid(r *http.Request, token string) bool {
 	if h.cfg.Onboarding.LocalBypass {
-		clientIP := localip.ExtractIP(r.RemoteAddr)
+		clientIP := localip.ClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), h.trusted)
 		if clientIP != nil && localip.IsLocal(clientIP) {
 			return true
 		}
@@ -426,6 +536,55 @@ func (h *Handler) clientIP(r *http.Request) string {
 	return ip.String()
 }
 
+func (h *Handler) siteForRequest(r *http.Request) (*config.SiteConfig, *webauthn.WebAuthn, error) {
+	s := h.sites.Resolve(r)
+	if s == nil {
+		return nil, nil, fmt.Errorf("unknown site")
+	}
+	wan, ok := h.wanBySite[s.ID]
+	if !ok {
+		return nil, nil, fmt.Errorf("no webauthn config")
+	}
+	return s, wan, nil
+}
+
+func (h *Handler) validOrigin(r *http.Request, siteCfg *config.SiteConfig) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	return originMatches(origin, siteCfg.PublicOrigin)
+}
+
+func (h *Handler) cookieSecure(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	clientIP := localip.ExtractIP(r.RemoteAddr)
+	if clientIP != nil && localip.IsTrustedProxy(clientIP, h.trusted) {
+		return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+	}
+	return false
+}
+
+func originMatches(origin string, siteOrigin string) bool {
+	if origin == "" || siteOrigin == "" {
+		return false
+	}
+	originURL, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	siteURL, err := url.Parse(siteOrigin)
+	if err != nil {
+		return false
+	}
+	if !strings.EqualFold(originURL.Scheme, siteURL.Scheme) {
+		return false
+	}
+	return strings.EqualFold(originURL.Host, siteURL.Host)
+}
+
 func (h *Handler) allowRequest(r *http.Request) bool {
 	ip := h.clientIP(r)
 	if ip == "" {
@@ -439,6 +598,7 @@ func (h *Handler) allowRequest(r *http.Request) bool {
 		entry = &rateEntry{reset: now.Add(h.rateWindow)}
 		h.rate[ip] = entry
 	}
+	entry.lastSeen = now
 	if now.Before(entry.blockedUntil) {
 		return false
 	}
@@ -455,9 +615,15 @@ func (h *Handler) allowRequest(r *http.Request) bool {
 }
 
 func writeJSONError(w http.ResponseWriter, status int, msg string) {
+	setNoStore(w)
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func setNoStore(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 }
 
 func setSessionCookie(w http.ResponseWriter, name, value string, ttlDays int, secure bool) {
@@ -499,5 +665,17 @@ func (h *Handler) cleanupChallenges() {
 			}
 		}
 		h.mu.Unlock()
+
+		h.rateMu.Lock()
+		for ip, entry := range h.rate {
+			if entry == nil {
+				delete(h.rate, ip)
+				continue
+			}
+			if !entry.lastSeen.IsZero() && now.Sub(entry.lastSeen) > h.rateWindow && now.After(entry.blockedUntil) {
+				delete(h.rate, ip)
+			}
+		}
+		h.rateMu.Unlock()
 	}
 }

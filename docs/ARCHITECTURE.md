@@ -19,6 +19,7 @@ bouncer/
 │   ├── localip/            # RFC1918/loopback detection, trusted proxy logic
 │   ├── proxy/              # Reverse proxy with X-Forwarded-* headers
 │   ├── session/            # File-backed session store with TTL + cleanup
+│   ├── site/               # Host-based site registry (multi-site routing)
 │   └── token/              # 6-digit enrollment token generation
 └── web/
     ├── embed.go            # embed.FS for static files
@@ -35,9 +36,13 @@ main.go
 │   └── config
 ├── session         (file-backed sessions)
 │   └── atomicfile
+├── site            (host-based site registry)
+│   ├── config
+│   └── localip
 ├── authn           (WebAuthn handlers)
 │   ├── config
 │   ├── session
+│   ├── site
 │   ├── localip
 │   └── go-webauthn/webauthn (external)
 ├── proxy           (reverse proxy)
@@ -53,8 +58,9 @@ main.go
 
 ```
 Browser → HTTPS → Bouncer
-  1. Check session cookie
-  2. Valid? → forward to backend via reverse proxy
+  0. Resolve site by Host / X-Forwarded-Host (trusted proxies only)
+  1. Check session cookie (must match resolved site)
+  2. Valid? → forward to site backend via reverse proxy
   3. Invalid/missing? → redirect to /login
 ```
 
