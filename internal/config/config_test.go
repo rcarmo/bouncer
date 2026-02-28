@@ -48,7 +48,9 @@ func TestLoadExisting(t *testing.T) {
 	path := filepath.Join(dir, "bouncer.json")
 
 	data := []byte(`{"server":{"listen":":9999","backend":"http://localhost:5000"},"session":{"ttlDays":14}}`)
-	os.WriteFile(path, data, 0600)
+	if err := os.WriteFile(path, data, 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -128,10 +130,12 @@ func TestUpdateSignCount(t *testing.T) {
 	path := filepath.Join(dir, "bouncer.json")
 
 	cfg, _ := Load(path)
-	cfg.AddUser(User{
+	if err := cfg.AddUser(User{
 		ID: "u1", SiteID: "default", DisplayName: "A", Name: "a",
 		Credentials: []Credential{{ID: "c1", SignCount: 0}},
-	})
+	}); err != nil {
+		t.Fatalf("AddUser: %v", err)
+	}
 
 	if err := cfg.UpdateSignCount("default", "u1", "c1", 5); err != nil {
 		t.Fatalf("UpdateSignCount: %v", err)

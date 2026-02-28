@@ -63,12 +63,12 @@ type SessionConfig struct {
 }
 
 type OnboardingConfig struct {
-	Enabled            bool     `json:"enabled"`
-	Token              string   `json:"token"`
-	RotateTokenOnStart bool     `json:"rotateTokenOnStart"`
-	LocalBypass        bool     `json:"localBypass"`
-	ProfileURL         string   `json:"profileUrl"`
-	MacCertURL         string   `json:"macCertUrl"`
+	Enabled            bool   `json:"enabled"`
+	Token              string `json:"token"`
+	RotateTokenOnStart bool   `json:"rotateTokenOnStart"`
+	LocalBypass        bool   `json:"localBypass"`
+	ProfileURL         string `json:"profileUrl"`
+	MacCertURL         string `json:"macCertUrl"`
 	Instructions       struct {
 		IOS []string `json:"ios"`
 	} `json:"instructions"`
@@ -122,6 +122,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: abs path: %w", err)
 	}
 
+	// #nosec G304 -- config path is explicitly provided by the user.
 	data, err := os.ReadFile(absPath)
 	if os.IsNotExist(err) {
 		cfg := Defaults()

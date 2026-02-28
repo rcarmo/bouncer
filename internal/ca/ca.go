@@ -101,9 +101,7 @@ func EnsureServerCert(cfg *config.Config) error {
 	// Build SANs.
 	var dnsNames []string
 	var ipAddrs []net.IP
-	for _, h := range cfg.Server.Hostnames {
-		dnsNames = append(dnsNames, h)
-	}
+	dnsNames = append(dnsNames, cfg.Server.Hostnames...)
 	for _, ipStr := range cfg.Server.IPAddresses {
 		if ip := net.ParseIP(ipStr); ip != nil {
 			ipAddrs = append(ipAddrs, ip)

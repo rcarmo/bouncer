@@ -171,7 +171,9 @@ func TestPersistFilePermissions(t *testing.T) {
 	path := filepath.Join(dir, "sessions.json")
 
 	store, _ := NewStore(path, 7)
-	store.Create("default", "user-1")
+	if _, err := store.Create("default", "user-1"); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
 	store.Stop()
 
 	info, err := os.Stat(path)
@@ -191,8 +193,12 @@ func TestPruneRemovesExpired(t *testing.T) {
 	store, _ := NewStore(path, 0)
 	defer store.Stop()
 
-	store.Create("default", "user-1")
-	store.Create("default", "user-2")
+	if _, err := store.Create("default", "user-1"); err != nil {
+		t.Fatalf("Create user-1: %v", err)
+	}
+	if _, err := store.Create("default", "user-2"); err != nil {
+		t.Fatalf("Create user-2: %v", err)
+	}
 	time.Sleep(10 * time.Millisecond)
 
 	store.prune()
@@ -209,7 +215,9 @@ func TestPruneRemovesExpired(t *testing.T) {
 func TestLoadCorruptedFile(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sessions.json")
-	os.WriteFile(path, []byte("not json"), 0600)
+	if err := os.WriteFile(path, []byte("not json"), 0600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
 
 	_, err := NewStore(path, 7)
 	if err == nil {

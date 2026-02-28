@@ -12,7 +12,9 @@ func TestProxyForwardsRequest(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("X-Backend", "ok")
 		w.WriteHeader(200)
-		w.Write([]byte("hello from backend"))
+		if _, err := w.Write([]byte("hello from backend")); err != nil {
+			t.Fatalf("Write: %v", err)
+		}
 	}))
 	defer backend.Close()
 

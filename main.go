@@ -194,7 +194,9 @@ func main() {
 		}
 		data, _ := web.Static.ReadFile("login.html")
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write(data)
+		if _, err := w.Write(data); err != nil {
+			slog.Warn("write login page", "error", err)
+		}
 	})
 	mux.HandleFunc("GET /onboarding", func(w http.ResponseWriter, r *http.Request) {
 		if siteRegistry.Resolve(r) == nil {
@@ -220,7 +222,9 @@ func main() {
 				"<head>\n<meta name=\"cloudflare\" content=\"true\">", 1)
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Write([]byte(html))
+		if _, err := w.Write([]byte(html)); err != nil {
+			slog.Warn("write onboarding page", "error", err)
+		}
 	})
 
 	// Cert routes (local TLS mode only).
@@ -233,7 +237,9 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/x-apple-aspen-config")
 			w.Header().Set("Content-Disposition", "attachment; filename=bouncer.mobileconfig")
-			w.Write(data)
+			if _, err := w.Write(data); err != nil {
+				slog.Warn("write mobileconfig", "error", err)
+			}
 		})
 		mux.HandleFunc("GET /certs/rootCA.cer", func(w http.ResponseWriter, r *http.Request) {
 			der, err := ca.CACertDER(cfg)
@@ -243,7 +249,9 @@ func main() {
 			}
 			w.Header().Set("Content-Type", "application/x-x509-ca-cert")
 			w.Header().Set("Content-Disposition", "attachment; filename=bouncer-ca.cer")
-			w.Write(der)
+			if _, err := w.Write(der); err != nil {
+				slog.Warn("write ca cert", "error", err)
+			}
 		})
 	}
 
@@ -306,7 +314,9 @@ func main() {
 		}()
 		<-ctx.Done()
 		slog.Info("shutting down...")
-		srv.Shutdown(context.Background())
+		if err := srv.Shutdown(context.Background()); err != nil {
+			slog.Warn("http shutdown", "error", err)
+		}
 	} else {
 		// Local TLS mode.
 		certPEM, keyPEM, err := ca.ServerTLSKeyPair(cfg)
@@ -355,7 +365,9 @@ func main() {
 				}
 				w.Header().Set("Content-Type", "application/x-apple-aspen-config")
 				w.Header().Set("Content-Disposition", "attachment; filename=bouncer.mobileconfig")
-				w.Write(data)
+				if _, err := w.Write(data); err != nil {
+					slog.Warn("write mobileconfig", "error", err)
+				}
 			})
 			httpMux.HandleFunc("GET /certs/rootCA.cer", func(w http.ResponseWriter, r *http.Request) {
 				der, err := ca.CACertDER(cfg)
@@ -365,7 +377,9 @@ func main() {
 				}
 				w.Header().Set("Content-Type", "application/x-x509-ca-cert")
 				w.Header().Set("Content-Disposition", "attachment; filename=bouncer-ca.cer")
-				w.Write(der)
+				if _, err := w.Write(der); err != nil {
+					slog.Warn("write ca cert", "error", err)
+				}
 			})
 			httpMux.HandleFunc("GET /onboarding", func(w http.ResponseWriter, r *http.Request) {
 				if siteRegistry.Resolve(r) == nil {
@@ -374,7 +388,9 @@ func main() {
 				}
 				data, _ := web.Static.ReadFile("onboarding.html")
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.Write(data)
+				if _, err := w.Write(data); err != nil {
+					slog.Warn("write onboarding page", "error", err)
+				}
 			})
 			httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 				siteCfg := siteRegistry.Resolve(r)
@@ -414,9 +430,13 @@ func main() {
 		}()
 		<-ctx.Done()
 		slog.Info("shutting down...")
-		server.Shutdown(context.Background())
+		if err := server.Shutdown(context.Background()); err != nil {
+			slog.Warn("https shutdown", "error", err)
+		}
 		if httpSrv != nil {
-			httpSrv.Shutdown(context.Background())
+			if err := httpSrv.Shutdown(context.Background()); err != nil {
+				slog.Warn("http shutdown", "error", err)
+			}
 		}
 	}
 }

@@ -54,11 +54,15 @@ func TestEnsureCA(t *testing.T) {
 
 func TestEnsureCAIdempotent(t *testing.T) {
 	cfg := loadTestConfig(t)
-	EnsureCA(cfg)
+	if err := EnsureCA(cfg); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
 	origCert := cfg.Server.TLS.CA.CertPem
 
 	// Second call should not regenerate.
-	EnsureCA(cfg)
+	if err := EnsureCA(cfg); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
 	if cfg.Server.TLS.CA.CertPem != origCert {
 		t.Error("CA was regenerated on second call")
 	}
@@ -66,7 +70,9 @@ func TestEnsureCAIdempotent(t *testing.T) {
 
 func TestEnsureServerCert(t *testing.T) {
 	cfg := loadTestConfig(t)
-	EnsureCA(cfg)
+	if err := EnsureCA(cfg); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
 
 	if err := EnsureServerCert(cfg); err != nil {
 		t.Fatalf("EnsureServerCert: %v", err)
@@ -89,13 +95,19 @@ func TestEnsureServerCert(t *testing.T) {
 
 func TestServerCertRegeneratesOnSANChange(t *testing.T) {
 	cfg := loadTestConfig(t)
-	EnsureCA(cfg)
-	EnsureServerCert(cfg)
+	if err := EnsureCA(cfg); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
+	if err := EnsureServerCert(cfg); err != nil {
+		t.Fatalf("EnsureServerCert: %v", err)
+	}
 	origCert := cfg.Server.TLS.ServerCert.CertPem
 
 	// Change SANs.
 	cfg.Server.Hostnames = []string{"other.local"}
-	EnsureServerCert(cfg)
+	if err := EnsureServerCert(cfg); err != nil {
+		t.Fatalf("EnsureServerCert: %v", err)
+	}
 
 	if cfg.Server.TLS.ServerCert.CertPem == origCert {
 		t.Error("server cert was not regenerated after SAN change")
@@ -110,7 +122,9 @@ func TestServerCertRegeneratesOnSANChange(t *testing.T) {
 
 func TestCACertDER(t *testing.T) {
 	cfg := loadTestConfig(t)
-	EnsureCA(cfg)
+	if err := EnsureCA(cfg); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
 
 	der, err := CACertDER(cfg)
 	if err != nil {
@@ -128,7 +142,9 @@ func TestCACertDER(t *testing.T) {
 
 func TestGenerateMobileconfig(t *testing.T) {
 	cfg := loadTestConfig(t)
-	EnsureCA(cfg)
+	if err := EnsureCA(cfg); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
 
 	mc, err := GenerateMobileconfig(cfg)
 	if err != nil {
@@ -152,8 +168,12 @@ func TestGenerateMobileconfig(t *testing.T) {
 
 func TestServerTLSKeyPair(t *testing.T) {
 	cfg := loadTestConfig(t)
-	EnsureCA(cfg)
-	EnsureServerCert(cfg)
+	if err := EnsureCA(cfg); err != nil {
+		t.Fatalf("EnsureCA: %v", err)
+	}
+	if err := EnsureServerCert(cfg); err != nil {
+		t.Fatalf("EnsureServerCert: %v", err)
+	}
 
 	certPEM, keyPEM, err := ServerTLSKeyPair(cfg)
 	if err != nil {

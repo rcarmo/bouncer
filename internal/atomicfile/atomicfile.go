@@ -20,8 +20,12 @@ func Write(path string, data []byte, perm os.FileMode) error {
 	defer func() {
 		// Clean up on failure.
 		if tmp != nil {
-			tmp.Close()
-			os.Remove(tmpName)
+			if err := tmp.Close(); err != nil {
+				_ = err // Best effort cleanup.
+			}
+			if err := os.Remove(tmpName); err != nil && !os.IsNotExist(err) {
+				_ = err // Best effort cleanup.
+			}
 		}
 	}()
 
@@ -37,11 +41,15 @@ func Write(path string, data []byte, perm os.FileMode) error {
 	tmp = nil // Prevent defer cleanup.
 
 	if err := os.Chmod(tmpName, perm); err != nil {
-		os.Remove(tmpName)
+		if rmErr := os.Remove(tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+			_ = rmErr // Best effort cleanup.
+		}
 		return fmt.Errorf("atomicfile: chmod: %w", err)
 	}
 	if err := os.Rename(tmpName, path); err != nil {
-		os.Remove(tmpName)
+		if rmErr := os.Remove(tmpName); rmErr != nil && !os.IsNotExist(rmErr) {
+			_ = rmErr // Best effort cleanup.
+		}
 		return fmt.Errorf("atomicfile: rename: %w", err)
 	}
 	return nil

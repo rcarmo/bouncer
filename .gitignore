@@ -1,5 +1,6 @@
 # Binary
 bouncer
+bin/
 
 # Runtime data
 bouncer.json

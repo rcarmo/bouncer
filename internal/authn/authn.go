@@ -189,7 +189,12 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create a temporary user for registration.
-	userID := randomUserID()
+	userID, err := randomUserID()
+	if err != nil {
+		slog.Error("webauthn: random user id", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	if req.DisplayName == "" {
 		req.DisplayName = "User"
 	}
@@ -213,7 +218,12 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Store challenge.
-	challengeID := randomChallengeID()
+	challengeID, err := randomChallengeID()
+	if err != nil {
+		slog.Error("webauthn: random challenge", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	h.mu.Lock()
 	h.challenges[challengeID] = &challengeEntry{
 		data:        sessionData,
@@ -233,7 +243,9 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		"name":        req.Name,
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Warn("webauthn: write response", "error", err)
+	}
 }
 
 // RegisterVerify handles POST /webauthn/register/verify.
@@ -356,7 +368,9 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 
 	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.cookieSecure(r))
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		slog.Warn("webauthn: write response", "error", err)
+	}
 }
 
 // LoginOptions handles POST /webauthn/login/options.
@@ -385,7 +399,12 @@ func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	challengeID := randomChallengeID()
+	challengeID, err := randomChallengeID()
+	if err != nil {
+		slog.Error("webauthn: random challenge", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	h.mu.Lock()
 	h.challenges[challengeID] = &challengeEntry{
 		data:    sessionData,
@@ -399,7 +418,9 @@ func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
 		"challengeId": challengeID,
 	}
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(resp)
+	if err := json.NewEncoder(w).Encode(resp); err != nil {
+		slog.Warn("webauthn: write response", "error", err)
+	}
 }
 
 // LoginVerify handles POST /webauthn/login/verify.
@@ -484,7 +505,9 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 	setSessionCookie(w, h.cfg.Session.CookieName, sessID, h.cfg.Session.TTLDays, h.cookieSecure(r))
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		slog.Warn("webauthn: write response", "error", err)
+	}
 }
 
 // Logout handles POST /logout.
@@ -513,7 +536,9 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		SameSite: http.SameSiteLaxMode,
 	})
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		slog.Warn("webauthn: write response", "error", err)
+	}
 }
 
 // --- helpers ---
@@ -638,18 +663,27 @@ func setSessionCookie(w http.ResponseWriter, name, value string, ttlDays int, se
 	})
 }
 
-func randomUserID() string {
+func randomUserID() (string, error) {
 	b := make([]byte, 16)
-	rand.Read(b)
-	return fmt.Sprintf("%x", b)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x", b), nil
 }
 
-func randomChallengeID() string {
+func randomChallengeID() (string, error) {
 	var b [8]byte
-	binary.BigEndian.PutUint64(b[:], uint64(time.Now().UnixNano()))
+	now := time.Now().UnixNano()
+	if now < 0 {
+		now = 0
+	}
+	// #nosec G115 -- time.Now().UnixNano is non-negative for real system time.
+	binary.BigEndian.PutUint64(b[:], uint64(now))
 	r := make([]byte, 8)
-	rand.Read(r)
-	return fmt.Sprintf("%x%x", b, r)
+	if _, err := rand.Read(r); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%x%x", b, r), nil
 }
 
 // cleanupChallenges periodically removes expired challenges.

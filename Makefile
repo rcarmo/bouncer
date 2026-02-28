@@ -5,6 +5,9 @@ SHELL := /bin/sh
 BINARY := bouncer
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.version=$(VERSION)
+BIN_DIR := $(CURDIR)/bin
+export PATH := $(BIN_DIR):$(PATH)
+LINT_TOOLCHAIN ?= go1.23.4
 
 IMAGE ?= $(notdir $(CURDIR))
 TAG ?= latest
@@ -57,8 +60,26 @@ install: deps ## Install project dependencies
 
 .PHONY: install-dev
 install-dev: ## Install dev tools (golangci-lint, gosec)
-	@command -v golangci-lint >/dev/null 2>&1 || go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.56.2
-	@command -v gosec >/dev/null 2>&1 || go install github.com/securego/gosec/v2/cmd/gosec@v2.19.0
+	@mkdir -p $(BIN_DIR)
+	@set -e; \
+	OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
+	ARCH=$$(uname -m); \
+	if [ "$$ARCH" = "x86_64" ]; then ARCH=amd64; fi; \
+	if [ "$$ARCH" = "aarch64" ]; then ARCH=arm64; fi; \
+	if ! command -v golangci-lint >/dev/null 2>&1; then \
+		URL="https://github.com/golangci/golangci-lint/releases/download/v1.62.2/golangci-lint-1.62.2-$${OS}-$${ARCH}.tar.gz"; \
+		TMP=$$(mktemp -d); \
+		curl -sSL $$URL | tar -xz -C $$TMP; \
+		mv $$TMP/golangci-lint-1.62.2-$${OS}-$${ARCH}/golangci-lint $(BIN_DIR)/; \
+		rm -rf $$TMP; \
+	fi; \
+	if ! command -v gosec >/dev/null 2>&1; then \
+		URL="https://github.com/securego/gosec/releases/download/v2.21.2/gosec_2.21.2_$${OS}_$${ARCH}.tar.gz"; \
+		TMP=$$(mktemp -d); \
+		curl -sSL $$URL | tar -xz -C $$TMP; \
+		mv $$TMP/gosec $(BIN_DIR)/; \
+		rm -rf $$TMP; \
+	fi
 
 # =============================================================================
 # Quality
@@ -67,8 +88,18 @@ install-dev: ## Install dev tools (golangci-lint, gosec)
 .PHONY: lint
 lint: ## Run linters
 	go vet ./...
-	@command -v golangci-lint >/dev/null 2>&1 && golangci-lint run ./... || echo "golangci-lint not installed; skipping"
-	@command -v gosec >/dev/null 2>&1 && gosec ./... || echo "gosec not installed; skipping"
+	@if command -v golangci-lint >/dev/null 2>&1; then \
+		GOTOOLCHAIN=$(LINT_TOOLCHAIN) golangci-lint run ./...; \
+	else \
+		echo "golangci-lint not installed; run make install-dev"; \
+		exit 1; \
+	fi
+	@if command -v gosec >/dev/null 2>&1; then \
+		GOTOOLCHAIN=$(LINT_TOOLCHAIN) gosec ./...; \
+	else \
+		echo "gosec not installed; run make install-dev"; \
+		exit 1; \
+	fi
 
 .PHONY: format
 format: ## Format code

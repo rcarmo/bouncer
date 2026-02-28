@@ -115,7 +115,9 @@ func TestRegisterOptionsValidToken(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
 	if resp["challengeId"] == nil {
 		t.Error("missing challengeId in response")
 	}
@@ -220,7 +222,9 @@ func TestLoginOptions(t *testing.T) {
 	}
 
 	var resp map[string]interface{}
-	json.NewDecoder(rr.Body).Decode(&resp)
+	if err := json.NewDecoder(rr.Body).Decode(&resp); err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
 	if resp["challengeId"] == nil {
 		t.Error("missing challengeId")
 	}
