@@ -1,6 +1,12 @@
-# Binary
+# Build artifacts
 bouncer
 bin/
+dist/
+*.exe
+*.test
+*.out
+*.prof
+coverage.out
 
 # Runtime data
 bouncer.json
@@ -10,6 +16,11 @@ sessions.json
 *.pem
 *.cer
 *.mobileconfig
+
+# Env/logs
+.env
+.env.*
+*.log
 
 # IDE
 .idea/
@@ -22,5 +33,7 @@ sessions.json
 .DS_Store
 Thumbs.db
 
-# Test
-coverage.out
+# Temp
+.tmp/
+.tmp*
+tmp/

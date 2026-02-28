@@ -489,6 +489,7 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 	credIDStr := base64.RawURLEncoding.EncodeToString(credential.ID)
 	user, _ := h.cfg.FindUserByCredentialID(entry.siteID, credIDStr)
 	if user == nil {
+		// #nosec G706 -- structured logging of credential ID for diagnostics.
 		slog.Error("webauthn: user not found after login", "credentialID", credIDStr)
 		writeJSONError(w, http.StatusInternalServerError, "user not found")
 		return

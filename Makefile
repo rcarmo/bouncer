@@ -5,9 +5,9 @@ SHELL := /bin/sh
 BINARY := bouncer
 VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS := -s -w -X main.version=$(VERSION)
-BIN_DIR := $(CURDIR)/bin
-export PATH := $(BIN_DIR):$(PATH)
-LINT_TOOLCHAIN ?= go1.23.4
+GOBIN ?= $(shell go env GOPATH)/bin
+export PATH := $(GOBIN):$(PATH)
+LINT_TOOLCHAIN ?= go1.26.0
 
 IMAGE ?= $(notdir $(CURDIR))
 TAG ?= latest
@@ -60,26 +60,8 @@ install: deps ## Install project dependencies
 
 .PHONY: install-dev
 install-dev: ## Install dev tools (golangci-lint, gosec)
-	@mkdir -p $(BIN_DIR)
-	@set -e; \
-	OS=$$(uname -s | tr '[:upper:]' '[:lower:]'); \
-	ARCH=$$(uname -m); \
-	if [ "$$ARCH" = "x86_64" ]; then ARCH=amd64; fi; \
-	if [ "$$ARCH" = "aarch64" ]; then ARCH=arm64; fi; \
-	if ! command -v golangci-lint >/dev/null 2>&1; then \
-		URL="https://github.com/golangci/golangci-lint/releases/download/v1.62.2/golangci-lint-1.62.2-$${OS}-$${ARCH}.tar.gz"; \
-		TMP=$$(mktemp -d); \
-		curl -sSL $$URL | tar -xz -C $$TMP; \
-		mv $$TMP/golangci-lint-1.62.2-$${OS}-$${ARCH}/golangci-lint $(BIN_DIR)/; \
-		rm -rf $$TMP; \
-	fi; \
-	if ! command -v gosec >/dev/null 2>&1; then \
-		URL="https://github.com/securego/gosec/releases/download/v2.21.2/gosec_2.21.2_$${OS}_$${ARCH}.tar.gz"; \
-		TMP=$$(mktemp -d); \
-		curl -sSL $$URL | tar -xz -C $$TMP; \
-		mv $$TMP/gosec $(BIN_DIR)/; \
-		rm -rf $$TMP; \
-	fi
+	@command -v golangci-lint >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+	@command -v gosec >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.24.6
 
 # =============================================================================
 # Quality

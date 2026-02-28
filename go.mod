@@ -1,6 +1,8 @@
 module github.com/rcarmo/bouncer
 
-go 1.23
+go 1.26
+
+toolchain go1.26.0
 
 require github.com/go-webauthn/webauthn v0.11.2
 

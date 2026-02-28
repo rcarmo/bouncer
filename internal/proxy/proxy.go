@@ -48,6 +48,7 @@ func New(backendURL string, trusted []*net.IPNet) (*httputil.ReverseProxy, error
 			}
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			// #nosec G706 -- structured logging of request URL for diagnostics.
 			slog.Error("proxy error", "url", r.URL.String(), "error", err)
 			http.Error(w, "bad gateway", http.StatusBadGateway)
 		},
