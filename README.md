@@ -1,5 +1,7 @@
 # Bouncer
 
+![Bouncer](docs/icon-256.png)
+
 A Go-based reverse proxy that protects backend HTTP services with [WebAuthn](https://webauthn.guide/) (passkeys). Zero-config TLS with a built-in CA, file-backed sessions, and a simple onboarding flow for iOS/macOS devices.
 
 ## Features
