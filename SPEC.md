@@ -292,6 +292,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 ## HTTP Routes
 
 ### UI
+- `GET /` → landing page (unauthenticated entry point)
 - `GET /login` → login page (passkey sign-in)
 - `GET /onboarding` → onboarding page (profile + passkey creation)
 
@@ -308,7 +309,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 
 ### Proxy
 - All other paths → forwarded to backend **only if authenticated**.
-- Unauthenticated requests → redirect to `/login` or `/onboarding`.
+- Unauthenticated `GET /` requests → landing page; other requests → redirect to `/login` or `/onboarding`.
 
 ---
 

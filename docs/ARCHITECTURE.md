@@ -17,12 +17,14 @@ bouncer/
 │   ├── ca/                 # Built-in CA, server cert, mobileconfig generation
 │   ├── config/             # Config types, JSON persistence, user CRUD
 │   ├── localip/            # RFC1918/loopback detection, trusted proxy logic
+│   ├── notify/             # GeoIP providers + Pushover alerts
 │   ├── proxy/              # Reverse proxy with X-Forwarded-* headers
 │   ├── session/            # File-backed session store with TTL + cleanup
 │   ├── site/               # Host-based site registry (multi-site routing)
 │   └── token/              # 6-digit enrollment token generation
 └── web/
     ├── embed.go            # embed.FS for static files
+    ├── landing.html        # Unauthenticated landing page
     ├── login.html          # Passkey login page
     └── onboarding.html     # Onboarding page (trust + passkey creation)
 ```
@@ -47,6 +49,8 @@ main.go
 │   └── go-webauthn/webauthn (external)
 ├── proxy           (reverse proxy)
 │   └── localip
+├── notify          (GeoIP providers + Pushover)
+│   └── config
 ├── token           (enrollment token)
 ├── localip         (IP detection)
 └── web             (embedded HTML)
