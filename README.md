@@ -11,7 +11,7 @@ A Go-based reverse proxy that protects backend HTTP services with [WebAuthn](htt
 - **iOS/macOS onboarding** — serves `.mobileconfig` profiles for trust installation
 - **Cloudflare Tunnel mode** — skip local TLS entirely, use Cloudflare for HTTPS
 - **Single JSON config** — config + user DB in one file; sessions in a separate file
-- **6-digit enrollment token** — printed to stdout, with local-IP bypass
+- **One-time enrollment token** — 6 digits, issued on demand, logged + optional Pushover; local-IP bypass supported
 - **Enrollment alerts** — optional Pushover notifications with IP/UA/geo info
 - **Transparent reverse proxy** — authenticated users are forwarded to the backend seamlessly
 - **Static binary** — single Go binary, Docker-ready
@@ -28,8 +28,8 @@ make build
 # Run with onboarding enabled
 ./bouncer --cloudflare --onboarding --backend http://localhost:3000
 
-# Note the 6-digit token printed to stdout
 # Visit your Cloudflare hostname → /onboarding
+# Start registration to trigger a one-time token (printed to logs and sent via Pushover)
 ```
 
 ### Local TLS mode
@@ -63,13 +63,14 @@ Flags:
   --ip <addr>             IP for TLS SANs (may be repeated)
   --onboarding            Enable onboarding mode (allow registration)
   --cloudflare            Cloudflare Tunnel mode (no local TLS)
+  --dbip-update           Download/update DB-IP Lite database and exit
   --log-level <level>     debug|info|warn|error
 ```
 
 ## How It Works
 
 1. **Normal mode**: users must authenticate with a passkey to access the backend.
-2. **Onboarding mode** (`--onboarding`): new users can register a passkey using a 6-digit token (printed to logs). Local network users can bypass the token. Optional Pushover alerts can be sent with IP/UA + basic geolocation.
+2. **Onboarding mode** (`--onboarding`): new users can register a passkey using a one-time 6-digit token (issued on demand and logged). Local network users can bypass the token. Optional Pushover alerts can be sent with IP/UA + basic geolocation.
 3. **Cloudflare mode** (`--cloudflare`): Cloudflare provides HTTPS; Bouncer skips TLS and certificate onboarding.
 
 Sessions expire after 7 days (configurable) and are persisted across restarts.
@@ -142,6 +143,9 @@ See [SPEC.md](SPEC.md) for the full JSON schema and configuration reference.
 {
   "onboarding": {
     "enabled": true,
+    "oneTimeToken": true,
+    "rotateTokenOnStart": true,
+    "localBypass": true,
     "pushover": {
       "enabled": true,
       "apiToken": "pushover-app-token",
@@ -151,13 +155,25 @@ See [SPEC.md](SPEC.md) for the full JSON schema and configuration reference.
     },
     "geoip": {
       "enabled": true,
-      "url": "https://ipapi.co/%s/json/",
       "timeoutSeconds": 2,
-      "cacheTtlSeconds": 3600
+      "cacheTtlSeconds": 3600,
+      "preferCloudflareHeaders": true,
+      "dbip": {
+        "enabled": true,
+        "databasePath": "dbip-city-lite.sqlite",
+        "autoUpdate": true,
+        "updateIntervalHours": 24,
+        "updatePageUrl": "https://db-ip.com/db/download/ip-to-city-lite"
+      }
     }
   }
 }
 ```
+
+Notes:
+- When `oneTimeToken` is `true`, tokens are issued on the first registration attempt and consumed after use. `rotateTokenOnStart` is ignored.
+- When `preferCloudflareHeaders` is `true`, Cloudflare geolocation headers are used first (from trusted proxies), falling back to local DB-IP Lite or an optional external geoip URL if configured.
+- DB-IP Lite requires attribution to db-ip.com on any page that displays or uses the data.
 
 ## Architecture
 

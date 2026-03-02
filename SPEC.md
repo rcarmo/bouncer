@@ -50,12 +50,12 @@ Key components:
 
 ### 2) Onboarding Mode (`--onboarding`)
 - Registration enabled.
-- Enrollment requires a **six‑digit token**; local IP ranges (RFC1918 + loopback) bypass the token when `onboarding.localBypass` is `true` (default).
-- Token is **randomly generated on startup** and **printed to stdout/proxy logs**.
+- Enrollment requires a **one‑time six‑digit token**; local IP ranges (RFC1918 + loopback) bypass the token when `onboarding.localBypass` is `true` (default).
+- Token is **issued on demand** on the first registration attempt, **printed to logs** and optionally sent via Pushover; it is consumed after use.
 - Optional **Pushover alerts** can be sent on enrollment attempts (IP, UA, basic geo lookup).
 - Users without a valid session see **onboarding UI**:
   - If TLS is not trusted (local CA use‑case): prompt to install the profile.
-  - Then prompt to **enter the 6‑digit token** and **create a passkey**.
+  - Then prompt to **enter the one‑time 6‑digit token** and **create a passkey**.
 - After passkey creation, user is redirected to the backend.
 
 ### 3) Cloudflare Tunnel Mode (`--cloudflare`)
@@ -64,6 +64,44 @@ Key components:
 - `rpID` and `publicOrigin` must be set to the **Cloudflare hostname** (not the local address).
 - Onboarding UI **skips certificate/profile installation** and goes directly to passkey registration/login.
 - Bouncer trusts `X-Forwarded-Proto` only from IPs listed in `server.trustedProxies` (loopback is auto-trusted in Cloudflare mode).
+
+---
+
+## Deployment Scenarios
+
+### 1) Public HTTPS (Cloudflare Tunnel / Tailscale Funnel)
+
+Use this when the public hostname is terminated by an external edge proxy.
+
+```mermaid
+flowchart LR
+  U[User Browser] -->|HTTPS| E[Cloudflare/Tailscale Edge]
+  E -->|HTTP + X-Forwarded-Proto| B[Bouncer]
+  B --> A[Backend App]
+```
+
+**Interaction flow**
+1. User visits `https://public.example.com/onboarding`.
+2. Bouncer issues a **one-time token** on the first registration attempt (logged + Pushover).
+3. User enters the token, completes WebAuthn registration, and receives a session cookie.
+4. Authenticated requests are forwarded to the backend.
+
+### 2) Local HTTPS (private domain + private CA)
+
+Use this for LAN-only deployments where Bouncer terminates TLS.
+
+```mermaid
+flowchart LR
+  U[User Browser] -->|HTTP| B[Bouncer]
+  U -->|HTTPS (after trust)| B
+  B --> A[Backend App]
+```
+
+**Interaction flow**
+1. User visits `http://bouncer.local/onboarding` to download the trust profile.
+2. After installing the CA, the user returns to `https://bouncer.local/onboarding`.
+3. Bouncer validates the token (or local bypass) and registers the passkey.
+4. Authenticated requests are forwarded to the backend.
 
 ---
 
@@ -80,6 +118,7 @@ Flags:
   --ip <addr>             Override IP SAN for TLS/WebAuthn (may be repeated)
   --onboarding            Enable onboarding mode (allow registration)
   --cloudflare            Enable Cloudflare Tunnel mode (no local TLS/profile flow)
+  --dbip-update           Download/update DB-IP Lite database and exit
   --log-level <level>     info|debug|warn|error
 
 Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in single-site mode. When `sites` is configured, these flags are ignored.
@@ -140,6 +179,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
     "enabled": false,
     "token": "",
     "rotateTokenOnStart": true,
+    "oneTimeToken": true,
     "localBypass": true,
     "profileUrl": "/certs/rootCA.mobileconfig",
     "macCertUrl": "/certs/rootCA.cer",
@@ -159,9 +199,18 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
     },
     "geoip": {
       "enabled": true,
-      "url": "https://ipapi.co/%s/json/",
       "timeoutSeconds": 2,
-      "cacheTtlSeconds": 3600
+      "cacheTtlSeconds": 3600,
+      "preferCloudflareHeaders": true,
+      "dbip": {
+        "enabled": true,
+        "databasePath": "dbip-city-lite.sqlite",
+        "autoUpdate": true,
+        "updateIntervalHours": 24,
+        "updatePageUrl": "https://db-ip.com/db/download/ip-to-city-lite",
+        "updateUrl": "",
+        "downloadTimeoutSeconds": 30
+      }
     }
   },
   "users": [
@@ -193,8 +242,18 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - If `sites` is set, each site defines its own `publicOrigin`, `rpID`, and `backend`. CLI overrides for `--backend`, `--hostname`, and `--ip` are ignored in multi-site mode.
 - `session.ttlDays`: sessions expire after this many days (default 7); user must re‑authenticate with passkey.
 - `session.file`: path to the sessions JSON file (default `sessions.json`, relative to config dir).
-- `onboarding.rotateTokenOnStart`: if `true`, a new 6‑digit token is generated on each startup (old token discarded).
+- `onboarding.oneTimeToken`: if `true`, tokens are issued on demand and consumed after a successful registration options request (default `true`).
+- `onboarding.rotateTokenOnStart`: if `true`, a new 6‑digit token is generated on each startup (old token discarded). Ignored when `oneTimeToken` is `true`.
 - `onboarding.localBypass`: if `true`, requests from RFC1918 + loopback IPs skip the token requirement.
+- `onboarding.geoip.preferCloudflareHeaders`: if `true`, Cloudflare geolocation headers are used first (from trusted proxies), falling back to DB-IP Lite or an optional external geoip URL if configured.
+- `onboarding.geoip.dbip.enabled`: enable the local DB-IP Lite SQLite database provider.
+- `onboarding.geoip.dbip.databasePath`: path to the SQLite database (relative to `bouncer.json` by default).
+- `onboarding.geoip.dbip.autoUpdate`: if `true`, refresh the DB-IP Lite database automatically.
+- `onboarding.geoip.dbip.updateIntervalHours`: how often to check for updates (default 24h).
+- `onboarding.geoip.dbip.updatePageUrl`: download page used to resolve the latest CSV URL.
+- `onboarding.geoip.dbip.updateUrl`: optional direct URL to the CSV gzip (overrides `updatePageUrl`).
+- `onboarding.geoip.dbip.downloadTimeoutSeconds`: download timeout in seconds.
+- DB-IP Lite is licensed under CC BY 4.0 and **requires attribution** to db-ip.com on pages that display or use the data.
 - `users` holds registered WebAuthn credentials. In multi-site mode, each user is tagged with `site` (defaults to `default` for legacy entries).
 
 ---
@@ -204,7 +263,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 ### Registration (Onboarding Mode only)
 1. User visits `/onboarding`.
 2. If required, user installs the trust profile/cert.
-3. User enters **six‑digit enrollment token**.
+3. User enters the **one‑time six‑digit enrollment token** (issued on demand).
    - If `onboarding.localBypass` is `true` and request is from RFC1918/loopback, token is not required.
 4. Client calls `POST /webauthn/register/options` (token included).
 5. Server returns `PublicKeyCredentialCreationOptions`.
@@ -370,7 +429,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - HTTP servers enforce sane timeouts and max header size to mitigate slowloris-style attacks.
 - Protect `bouncer.json` and `sessions.json` with restrictive file permissions (0600).
 - Enrollment token is **6 digits**, generated via `crypto/rand`.
-- Token is **printed to stdout/proxy logs** when onboarding is active; never exposed via API.
+- Token is **issued on demand**, logged (and optionally sent via Pushover), and never exposed via API.
 - `onboarding.localBypass`: when enabled, only RFC1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) + loopback (`127.0.0.0/8`, `::1`) skip the token.
 - `trustedProxies`: `X-Forwarded-*` headers are stripped unless `RemoteAddr` matches a trusted proxy CIDR. Prevents origin/proto spoofing.
 
@@ -380,7 +439,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - **`bouncer.json`**: config + user DB. Loaded at startup; written back on credential changes. Atomic writes (temp + fsync + rename).
 - **`sessions.json`**: session records. Separate file so session churn doesn't rewrite the config. Atomic writes. Pruned of expired entries on startup and periodically.
 - CA key/cert PEM persisted in `bouncer.json` so trust survives restarts.
-- Enrollment token persisted in `bouncer.json`; rotated on startup when `rotateTokenOnStart` is `true`.
+- Enrollment token persisted in `bouncer.json` when issued; cleared after use when `oneTimeToken` is `true`. `rotateTokenOnStart` only applies when `oneTimeToken` is `false`.
 
 ---
 

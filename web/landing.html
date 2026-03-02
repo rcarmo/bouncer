@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Bouncer</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, system-ui, sans-serif; background: #f5f5f5; display: flex; align-items: center; justify-content: center; min-height: 100vh; }
+  .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); padding: 2rem; max-width: 420px; width: 90%; text-align: center; }
+  .mascot { width: 96px; height: 96px; margin: 0 auto 0.35rem; display: block; }
+  .caption { font-size: 0.9rem; color: #666; margin-bottom: 1rem; }
+  h1 { font-size: 1.6rem; margin-bottom: 0.5rem; }
+  p { color: #666; margin-bottom: 1.25rem; }
+  button { background: #111; color: #fff; border: none; border-radius: 8px; padding: 0.75rem 1.5rem; font-size: 1rem; cursor: pointer; width: 100%; margin-bottom: 0.75rem; }
+  button:hover { background: #333; }
+  button.secondary { background: #666; }
+  .hidden { display: none; }
+</style>
+</head>
+<body>
+<div class="card">
+  <img class="mascot" alt="Bouncer mascot" src="/static/icon-256.png" />
+  <div class="caption">No unwanted guests, bud.</div>
+  <h1>Bouncer</h1>
+  <p id="subtitle">Sign in or create a passkey to continue.</p>
+  <button id="onboard-btn" onclick="window.location.href='/onboarding'">Create Passkey</button>
+  <button class="secondary" onclick="window.location.href='/login'">Sign in with Passkey</button>
+</div>
+
+<script type="module">
+const meta = document.querySelector('meta[name="onboarding"]');
+const enabled = meta && meta.content === 'true';
+if (!enabled) {
+  const btn = document.getElementById('onboard-btn');
+  if (btn) btn.classList.add('hidden');
+  const subtitle = document.getElementById('subtitle');
+  if (subtitle) subtitle.textContent = 'Sign in with your passkey to continue.';
+}
+</script>
+</body>
+</html>

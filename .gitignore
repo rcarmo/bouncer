@@ -11,6 +11,7 @@ coverage.out
 # Runtime data
 bouncer.json
 sessions.json
+*.sqlite
 
 # Certificates
 *.pem

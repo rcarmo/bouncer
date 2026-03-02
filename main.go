@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/rcarmo/bouncer/internal/ca"
 	"github.com/rcarmo/bouncer/internal/config"
 	"github.com/rcarmo/bouncer/internal/localip"
+	"github.com/rcarmo/bouncer/internal/notify"
 	"github.com/rcarmo/bouncer/internal/proxy"
 	"github.com/rcarmo/bouncer/internal/session"
 	"github.com/rcarmo/bouncer/internal/site"
@@ -53,6 +55,7 @@ func main() {
 		logLevel   string
 		hostnames  stringSlice
 		ips        stringSlice
+		dbipUpdate bool
 	)
 
 	flag.StringVar(&configPath, "config", "bouncer.json", "Path to JSON config")
@@ -60,6 +63,7 @@ func main() {
 	flag.StringVar(&backend, "backend", "", "Backend URL (overrides config)")
 	flag.BoolVar(&onboarding, "onboarding", false, "Enable onboarding mode")
 	flag.BoolVar(&cloudflare, "cloudflare", false, "Cloudflare Tunnel mode")
+	flag.BoolVar(&dbipUpdate, "dbip-update", false, "Download/update DB-IP Lite database and exit")
 	flag.StringVar(&logLevel, "log-level", "info", "Log level: debug|info|warn|error")
 	flag.Var(&hostnames, "hostname", "DNS name for TLS SANs (may be repeated)")
 	flag.Var(&ips, "ip", "IP for TLS SANs (may be repeated)")
@@ -74,6 +78,26 @@ func main() {
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
+	}
+
+	if dbipUpdate {
+		if !cfg.Onboarding.GeoIP.DBIP.Enabled {
+			slog.Error("dbip update requested but dbip is disabled")
+			os.Exit(1)
+		}
+		timeout := time.Duration(cfg.Onboarding.GeoIP.DBIP.DownloadTimeoutSeconds) * time.Second
+		if timeout <= 0 {
+			timeout = 30 * time.Second
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), timeout)
+		err := notify.RunDBIPUpdate(ctx, cfg.Onboarding.GeoIP.DBIP, filepath.Dir(cfg.Path()))
+		cancel()
+		if err != nil {
+			slog.Error("dbip update failed", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("dbip update complete")
+		os.Exit(0)
 	}
 
 	// Apply CLI overrides.
@@ -100,18 +124,23 @@ func main() {
 	// Onboarding mode.
 	cfg.Onboarding.Enabled = onboarding
 	if onboarding {
-		if cfg.Onboarding.RotateTokenOnStart || cfg.Onboarding.Token == "" {
-			t, err := token.Generate()
-			if err != nil {
-				slog.Error("failed to generate token", "error", err)
-				os.Exit(1)
+		if cfg.Onboarding.OneTimeToken {
+			slog.Info("=== ONBOARDING MODE ACTIVE ===")
+			slog.Info("enrollment tokens are one-time and issued on demand")
+		} else {
+			if cfg.Onboarding.RotateTokenOnStart || cfg.Onboarding.Token == "" {
+				t, err := token.Generate()
+				if err != nil {
+					slog.Error("failed to generate token", "error", err)
+					os.Exit(1)
+				}
+				cfg.Onboarding.Token = t
+				_ = cfg.Save()
 			}
-			cfg.Onboarding.Token = t
-			_ = cfg.Save()
+			slog.Info("=== ONBOARDING MODE ACTIVE ===")
+			slog.Info("enrollment token", "token", cfg.Onboarding.Token)
+			fmt.Printf("\n  Enrollment Token: %s\n\n", cfg.Onboarding.Token)
 		}
-		slog.Info("=== ONBOARDING MODE ACTIVE ===")
-		slog.Info("enrollment token", "token", cfg.Onboarding.Token)
-		fmt.Printf("\n  Enrollment Token: %s\n\n", cfg.Onboarding.Token)
 	}
 
 	// Parse trusted proxies.
@@ -190,6 +219,17 @@ func main() {
 	mux.HandleFunc("POST /logout", authnHandler.Logout)
 
 	// UI routes.
+	mux.HandleFunc("GET /static/icon-256.png", func(w http.ResponseWriter, r *http.Request) {
+		data, err := web.Static.ReadFile("icon-256.png")
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Content-Type", "image/png")
+		if _, err := w.Write(data); err != nil {
+			slog.Warn("write icon", "error", err)
+		}
+	})
 	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
 		if siteRegistry.Resolve(r) == nil {
 			http.NotFound(w, r)
@@ -279,6 +319,16 @@ func main() {
 			}
 		}
 		// Not authenticated.
+		if r.Method == http.MethodGet && r.URL.Path == "/" {
+			data, _ := web.Static.ReadFile("landing.html")
+			html := string(data)
+			html = strings.Replace(html, "<head>", fmt.Sprintf("<head>\n<meta name=\"onboarding\" content=\"%t\">", cfg.Onboarding.Enabled), 1)
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			if _, err := w.Write([]byte(html)); err != nil {
+				slog.Warn("write landing page", "error", err)
+			}
+			return
+		}
 		if cfg.Onboarding.Enabled {
 			http.Redirect(w, r, "/onboarding", http.StatusFound)
 		} else {

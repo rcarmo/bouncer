@@ -23,8 +23,20 @@ func TestDefaults(t *testing.T) {
 	if !cfg.Onboarding.RotateTokenOnStart {
 		t.Error("expected rotateTokenOnStart true")
 	}
+	if !cfg.Onboarding.OneTimeToken {
+		t.Error("expected oneTimeToken true")
+	}
 	if cfg.Onboarding.GeoIP.CacheTTLSeconds <= 0 {
 		t.Error("expected geoip cache ttl to be set")
+	}
+	if !cfg.Onboarding.GeoIP.PreferCloudflareHeaders {
+		t.Error("expected geoip preferCloudflareHeaders true")
+	}
+	if cfg.Onboarding.GeoIP.DBIP.UpdatePageURL == "" {
+		t.Error("expected dbip updatePageUrl to be set")
+	}
+	if cfg.Onboarding.GeoIP.DBIP.UpdateIntervalHours <= 0 {
+		t.Error("expected dbip updateIntervalHours to be set")
 	}
 }
 

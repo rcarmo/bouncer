@@ -52,6 +52,79 @@ main.go
 └── web             (embedded HTML)
 ```
 
+## Deployment Scenarios
+
+### 1) Public HTTPS (Cloudflare Tunnel / Tailscale Funnel)
+
+**When to use:** you have a public hostname and want zero local TLS setup.
+
+```mermaid
+sequenceDiagram
+  participant U as User Browser
+  participant E as Cloudflare/Tailscale Edge
+  participant B as Bouncer
+  participant A as Backend App
+
+  U->>E: https://public.example.com/onboarding
+  E->>B: HTTP (X-Forwarded-Proto: https)
+  B-->>U: Onboarding UI (no cert step)
+
+  Note over U,B: User starts registration
+  U->>E: POST /webauthn/register/options (token)
+  E->>B: POST /webauthn/register/options
+  B->>B: Issue one-time token if needed
+  B-->>U: Challenge
+
+  U->>E: POST /webauthn/register/verify
+  E->>B: POST /webauthn/register/verify
+  B-->>U: Session cookie
+
+  U->>E: GET /
+  E->>B: GET /
+  B->>A: Forward
+  A-->>U: App content
+```
+
+**Interaction flow**
+1. User hits `/onboarding` on the public HTTPS hostname.
+2. Bouncer issues a one-time token on the first registration attempt (logs + Pushover).
+3. User enters the token and completes WebAuthn registration.
+4. Session cookie is set and the request is forwarded to the backend.
+
+### 2) Local HTTPS (private domain + private CA)
+
+**When to use:** you have a local hostname and want LAN-only access.
+
+```mermaid
+sequenceDiagram
+  participant U as User Browser
+  participant B as Bouncer
+  participant A as Backend App
+
+  U->>B: http://bouncer.local/onboarding
+  B-->>U: Trust profile links
+  U->>B: GET /certs/rootCA.mobileconfig
+  B-->>U: Profile download
+  Note over U: Install profile and trust CA
+
+  U->>B: https://bouncer.local/onboarding
+  B-->>U: Onboarding UI
+  U->>B: POST /webauthn/register/options (token or local bypass)
+  B-->>U: Challenge
+  U->>B: POST /webauthn/register/verify
+  B-->>U: Session cookie
+
+  U->>B: GET /
+  B->>A: Forward
+  A-->>U: App content
+```
+
+**Interaction flow**
+1. User visits `/onboarding` over HTTP to fetch the trust profile.
+2. After trusting the CA, the user returns via HTTPS and registers a passkey.
+3. Bouncer validates the token (or local bypass) and issues a session.
+4. Authenticated requests are forwarded to the backend.
+
 ## Data Flow
 
 ### Normal Mode (authenticated request)
@@ -70,7 +143,7 @@ Browser → HTTPS → Bouncer
 Browser → HTTP/HTTPS → Bouncer
   1. GET /onboarding → serve onboarding page
   2. User installs .mobileconfig (local TLS only)
-  3. User enters 6-digit token (or skipped for local IPs)
+  3. User enters one-time 6-digit token (issued on demand; skipped for local IPs)
   4. POST /webauthn/register/options → server returns challenge
   5. Browser creates credential (navigator.credentials.create)
   6. POST /webauthn/register/verify → server verifies + saves user
@@ -130,7 +203,7 @@ Bouncer
 
 - **Session cookie**: httpOnly, Secure, SameSite=Lax. 7-day TTL (configurable).
 - **WebAuthn challenges**: stored in-memory, expire after 5 minutes.
-- **Enrollment token**: crypto/rand, printed to stdout only, never exposed via API.
+- **Enrollment token**: one-time 6-digit code issued on demand, logged (and optionally sent via Pushover), never exposed via API.
 - **Trusted proxies**: X-Forwarded-* headers stripped unless RemoteAddr matches CIDR list.
 - **File permissions**: bouncer.json and sessions.json written with mode 0600.
 

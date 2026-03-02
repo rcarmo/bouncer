@@ -66,6 +66,7 @@ type OnboardingConfig struct {
 	Enabled            bool   `json:"enabled"`
 	Token              string `json:"token"`
 	RotateTokenOnStart bool   `json:"rotateTokenOnStart"`
+	OneTimeToken       bool   `json:"oneTimeToken"`
 	LocalBypass        bool   `json:"localBypass"`
 	ProfileURL         string `json:"profileUrl"`
 	MacCertURL         string `json:"macCertUrl"`
@@ -86,10 +87,22 @@ type PushoverConfig struct {
 }
 
 type GeoIPConfig struct {
-	Enabled         bool   `json:"enabled"`
-	URL             string `json:"url"`
-	TimeoutSeconds  int    `json:"timeoutSeconds"`
-	CacheTTLSeconds int    `json:"cacheTtlSeconds"`
+	Enabled                 bool       `json:"enabled"`
+	URL                     string     `json:"url"`
+	TimeoutSeconds          int        `json:"timeoutSeconds"`
+	CacheTTLSeconds         int        `json:"cacheTtlSeconds"`
+	PreferCloudflareHeaders bool       `json:"preferCloudflareHeaders"`
+	DBIP                    DBIPConfig `json:"dbip"`
+}
+
+type DBIPConfig struct {
+	Enabled                bool   `json:"enabled"`
+	DatabasePath           string `json:"databasePath"`
+	AutoUpdate             bool   `json:"autoUpdate"`
+	UpdateIntervalHours    int    `json:"updateIntervalHours"`
+	UpdatePageURL          string `json:"updatePageUrl"`
+	UpdateURL              string `json:"updateUrl"`
+	DownloadTimeoutSeconds int    `json:"downloadTimeoutSeconds"`
 }
 
 type User struct {
@@ -126,6 +139,7 @@ func Defaults() *Config {
 		Onboarding: OnboardingConfig{
 			Enabled:            false,
 			RotateTokenOnStart: true,
+			OneTimeToken:       true,
 			LocalBypass:        true,
 			ProfileURL:         "/certs/rootCA.mobileconfig",
 			MacCertURL:         "/certs/rootCA.cer",
@@ -134,10 +148,20 @@ func Defaults() *Config {
 				TimeoutSeconds: 3,
 			},
 			GeoIP: GeoIPConfig{
-				Enabled:         true,
-				URL:             "https://ipapi.co/%s/json/",
-				TimeoutSeconds:  2,
-				CacheTTLSeconds: 3600,
+				Enabled:                 true,
+				URL:                     "",
+				TimeoutSeconds:          2,
+				CacheTTLSeconds:         3600,
+				PreferCloudflareHeaders: true,
+				DBIP: DBIPConfig{
+					Enabled:                false,
+					DatabasePath:           "dbip-city-lite.sqlite",
+					AutoUpdate:             true,
+					UpdateIntervalHours:    24,
+					UpdatePageURL:          "https://db-ip.com/db/download/ip-to-city-lite",
+					UpdateURL:              "",
+					DownloadTimeoutSeconds: 30,
+				},
 			},
 		},
 	}

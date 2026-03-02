@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -24,6 +25,7 @@ import (
 	"github.com/rcarmo/bouncer/internal/notify"
 	"github.com/rcarmo/bouncer/internal/session"
 	"github.com/rcarmo/bouncer/internal/site"
+	enrolltoken "github.com/rcarmo/bouncer/internal/token"
 )
 
 // Handler holds WebAuthn state and HTTP handlers.
@@ -37,6 +39,12 @@ type Handler struct {
 	// In-flight challenges keyed by a random challenge ID.
 	mu         sync.Mutex
 	challenges map[string]*challengeEntry
+
+	// Enrollment token state.
+	tokenMu        sync.Mutex
+	tokenAnnounced bool
+
+	geoProvider notify.GeoProvider
 
 	// Simple per-IP rate limiting.
 	rateMu        sync.Mutex
@@ -94,6 +102,7 @@ func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *s
 		trusted:       trusted,
 		challenges:    make(map[string]*challengeEntry),
 		rate:          make(map[string]*rateEntry),
+		geoProvider:   notify.NewGeoProvider(cfg.Onboarding.GeoIP, filepath.Dir(cfg.Path())),
 		rateLimit:     20,
 		rateWindow:    time.Minute,
 		blockDuration: 5 * time.Minute,
@@ -174,9 +183,14 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	validToken, bypass := h.tokenStatus(r, req.Token)
+	bypass := h.isLocalBypass(r)
+	if h.cfg.Onboarding.OneTimeToken && !bypass {
+		h.maybeAnnounceToken(r, h.peekToken())
+	}
+
+	validToken, bypass, currentToken := h.validateToken(r, strings.TrimSpace(req.Token))
 	go h.notifyEnrollmentAttempt(enrollmentMeta{
-		Token:         h.cfg.Onboarding.Token,
+		Token:         currentToken,
 		TokenProvided: strings.TrimSpace(req.Token) != "",
 		TokenValid:    validToken,
 		LocalBypass:   bypass,
@@ -187,8 +201,18 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		Host:          r.Host,
 		DisplayName:   req.DisplayName,
 		Name:          req.Name,
+		GeoHeaders:    h.geoHeadersFromRequest(r),
 	})
 	if !validToken {
+		if !bypass && h.cfg.Onboarding.OneTimeToken && currentToken == "" {
+			tokenValue, err := h.issueToken()
+			if err != nil {
+				slog.Error("failed to issue enrollment token", "error", err)
+				writeJSONError(w, http.StatusInternalServerError, "internal error")
+				return
+			}
+			h.announceEnrollmentToken(r, tokenValue)
+		}
 		writeJSONError(w, http.StatusForbidden, "invalid token")
 		return
 	}
@@ -572,6 +596,17 @@ type enrollmentMeta struct {
 	Host          string
 	DisplayName   string
 	Name          string
+	GeoHeaders    http.Header
+}
+
+type enrollmentTokenMeta struct {
+	Token      string
+	IP         string
+	UserAgent  string
+	AcceptLang string
+	Origin     string
+	Host       string
+	GeoHeaders http.Header
 }
 
 func (h *Handler) notifyEnrollmentAttempt(meta enrollmentMeta) {
@@ -584,7 +619,7 @@ func (h *Handler) notifyEnrollmentAttempt(meta enrollmentMeta) {
 	var geo *notify.GeoInfo
 	if cfg.GeoIP.Enabled {
 		geoCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.GeoIP.TimeoutSeconds)*time.Second)
-		geo, _ = notify.LookupGeoIP(geoCtx, cfg.GeoIP, meta.IP)
+		geo = h.lookupGeo(geoCtx, meta.IP, meta.GeoHeaders)
 		cancel()
 	}
 
@@ -638,18 +673,159 @@ func (h *Handler) notifyEnrollmentAttempt(meta enrollmentMeta) {
 	}
 }
 
-func (h *Handler) tokenStatus(r *http.Request, token string) (valid bool, bypass bool) {
-	if h.cfg.Onboarding.LocalBypass {
-		clientIP := localip.ClientIPFromRequest(r, h.trusted)
-		if clientIP != nil && localip.IsLocal(clientIP) {
-			return true, true
+func (h *Handler) announceEnrollmentToken(r *http.Request, token string) {
+	if token == "" {
+		return
+	}
+	ip := h.clientIP(r)
+	slog.Info("enrollment token issued", "token", token, "ip", ip)
+	fmt.Printf("\n  Enrollment Token: %s\n\n", token)
+	go h.notifyEnrollmentToken(enrollmentTokenMeta{
+		Token:      token,
+		IP:         ip,
+		UserAgent:  r.UserAgent(),
+		AcceptLang: r.Header.Get("Accept-Language"),
+		Origin:     r.Header.Get("Origin"),
+		Host:       r.Host,
+		GeoHeaders: h.geoHeadersFromRequest(r),
+	})
+}
+
+func (h *Handler) notifyEnrollmentToken(meta enrollmentTokenMeta) {
+	cfg := h.cfg.Onboarding
+	if !cfg.Pushover.Enabled {
+		return
+	}
+
+	ctx := context.Background()
+	var geo *notify.GeoInfo
+	if cfg.GeoIP.Enabled {
+		geoCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.GeoIP.TimeoutSeconds)*time.Second)
+		geo = h.lookupGeo(geoCtx, meta.IP, meta.GeoHeaders)
+		cancel()
+	}
+
+	lines := []string{"Enrollment token issued"}
+	if meta.Token != "" {
+		lines = append(lines, fmt.Sprintf("Token: %s", meta.Token))
+	}
+	if meta.IP != "" {
+		lines = append(lines, fmt.Sprintf("IP: %s", meta.IP))
+	}
+	if geo != nil {
+		loc := strings.Trim(strings.TrimSpace(fmt.Sprintf("%s, %s, %s", geo.City, geo.Region, geo.Country)), ", ")
+		if loc != "" {
+			lines = append(lines, fmt.Sprintf("Location: %s", loc))
+		}
+		if geo.Latitude != 0 || geo.Longitude != 0 {
+			lines = append(lines, fmt.Sprintf("Coords: %.4f, %.4f", geo.Latitude, geo.Longitude))
+		}
+		if geo.Org != "" {
+			lines = append(lines, fmt.Sprintf("Org: %s", geo.Org))
+		} else if geo.ISP != "" {
+			lines = append(lines, fmt.Sprintf("ISP: %s", geo.ISP))
 		}
 	}
-	return token == h.cfg.Onboarding.Token, false
+	if meta.UserAgent != "" {
+		lines = append(lines, fmt.Sprintf("UA: %s", meta.UserAgent))
+	}
+	if meta.AcceptLang != "" {
+		lines = append(lines, fmt.Sprintf("Lang: %s", meta.AcceptLang))
+	}
+	if meta.Origin != "" {
+		lines = append(lines, fmt.Sprintf("Origin: %s", meta.Origin))
+	} else if meta.Host != "" {
+		lines = append(lines, fmt.Sprintf("Host: %s", meta.Host))
+	}
+
+	message := truncate(strings.Join(lines, "\n"), 900)
+
+	pushCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Pushover.TimeoutSeconds)*time.Second)
+	defer cancel()
+	if err := notify.SendPushover(pushCtx, cfg.Pushover, "Bouncer enrollment token", message, h.cfg.Server.PublicOrigin); err != nil {
+		slog.Warn("pushover notification failed", "error", err)
+	}
+}
+
+func (h *Handler) isLocalBypass(r *http.Request) bool {
+	if !h.cfg.Onboarding.LocalBypass {
+		return false
+	}
+	clientIP := localip.ClientIPFromRequest(r, h.trusted)
+	return clientIP != nil && localip.IsLocal(clientIP)
+}
+
+func (h *Handler) peekToken() string {
+	h.tokenMu.Lock()
+	defer h.tokenMu.Unlock()
+	return strings.TrimSpace(h.cfg.Onboarding.Token)
+}
+
+func (h *Handler) issueToken() (string, error) {
+	value, err := enrolltoken.Generate()
+	if err != nil {
+		return "", err
+	}
+	h.tokenMu.Lock()
+	h.cfg.Onboarding.Token = value
+	h.tokenAnnounced = false
+	saveErr := h.cfg.Save()
+	h.tokenMu.Unlock()
+	if saveErr != nil {
+		slog.Warn("failed to save enrollment token", "error", saveErr)
+	}
+	return value, nil
+}
+
+func (h *Handler) maybeAnnounceToken(r *http.Request, token string) {
+	if token == "" {
+		return
+	}
+	h.tokenMu.Lock()
+	if h.tokenAnnounced || strings.TrimSpace(h.cfg.Onboarding.Token) != token {
+		h.tokenMu.Unlock()
+		return
+	}
+	h.tokenAnnounced = true
+	h.tokenMu.Unlock()
+	h.announceEnrollmentToken(r, token)
+}
+
+func (h *Handler) validateToken(r *http.Request, token string) (valid bool, bypass bool, current string) {
+	if h.isLocalBypass(r) {
+		return true, true, ""
+	}
+	token = strings.TrimSpace(token)
+	h.tokenMu.Lock()
+	defer h.tokenMu.Unlock()
+	current = strings.TrimSpace(h.cfg.Onboarding.Token)
+	if current == "" || token == "" || token != current {
+		return false, false, current
+	}
+	if h.cfg.Onboarding.OneTimeToken {
+		h.cfg.Onboarding.Token = ""
+		h.tokenAnnounced = false
+		if err := h.cfg.Save(); err != nil {
+			slog.Warn("failed to save config", "error", err)
+		}
+	}
+	return true, false, current
+}
+
+func (h *Handler) tokenStatus(r *http.Request, token string) (valid bool, bypass bool, current string) {
+	if h.isLocalBypass(r) {
+		return true, true, ""
+	}
+	token = strings.TrimSpace(token)
+	current = h.peekToken()
+	if current == "" || token == "" {
+		return false, false, current
+	}
+	return token == current, false, current
 }
 
 func (h *Handler) isTokenValid(r *http.Request, token string) bool {
-	valid, _ := h.tokenStatus(r, token)
+	valid, _, _ := h.tokenStatus(r, token)
 	return valid
 }
 
@@ -659,6 +835,28 @@ func (h *Handler) clientIP(r *http.Request) string {
 		return ""
 	}
 	return ip.String()
+}
+
+func (h *Handler) geoHeadersFromRequest(r *http.Request) http.Header {
+	if r == nil {
+		return nil
+	}
+	remote := localip.ExtractIP(r.RemoteAddr)
+	if remote == nil || len(h.trusted) == 0 || !localip.IsTrustedProxy(remote, h.trusted) {
+		return nil
+	}
+	return r.Header
+}
+
+func (h *Handler) lookupGeo(ctx context.Context, ip string, headers http.Header) *notify.GeoInfo {
+	if h.geoProvider == nil {
+		return nil
+	}
+	info, err := h.geoProvider.Lookup(ctx, ip, headers)
+	if err != nil {
+		return nil
+	}
+	return info
 }
 
 func (h *Handler) siteForRequest(r *http.Request) (*config.SiteConfig, *webauthn.WebAuthn, error) {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -22,6 +23,20 @@ type GeoInfo struct {
 	Longitude float64
 	Org       string
 	ISP       string
+}
+
+type GeoProvider interface {
+	Lookup(ctx context.Context, ip string, headers http.Header) (*GeoInfo, error)
+}
+
+type CloudflareGeoProvider struct{}
+
+type ExternalGeoProvider struct {
+	cfg config.GeoIPConfig
+}
+
+type FallbackGeoProvider struct {
+	providers []GeoProvider
 }
 
 type geoCacheEntry struct {
@@ -100,6 +115,94 @@ func LookupGeoIP(ctx context.Context, cfg config.GeoIPConfig, ip string) (*GeoIn
 		geoCache.mu.Unlock()
 	}
 	return info, nil
+}
+
+// CloudflareGeoFromHeaders extracts geolocation info from Cloudflare headers.
+// Returns nil if no meaningful data is present.
+func CloudflareGeoFromHeaders(headers http.Header) *GeoInfo {
+	if headers == nil {
+		return nil
+	}
+	info := &GeoInfo{}
+	info.IP = strings.TrimSpace(headers.Get("CF-Connecting-IP"))
+	info.Country = strings.TrimSpace(headers.Get("CF-IPCountry"))
+	info.Region = strings.TrimSpace(headers.Get("CF-Region"))
+	info.City = strings.TrimSpace(headers.Get("CF-IPCity"))
+
+	lat := strings.TrimSpace(headers.Get("CF-Latitude"))
+	lon := strings.TrimSpace(headers.Get("CF-Longitude"))
+	if lat != "" {
+		if parsed, err := strconv.ParseFloat(lat, 64); err == nil {
+			info.Latitude = parsed
+		}
+	}
+	if lon != "" {
+		if parsed, err := strconv.ParseFloat(lon, 64); err == nil {
+			info.Longitude = parsed
+		}
+	}
+
+	hasLocation := info.Country != "" || info.Region != "" || info.City != "" || info.Latitude != 0 || info.Longitude != 0
+	if !hasLocation {
+		return nil
+	}
+	return info
+}
+
+func (CloudflareGeoProvider) Lookup(_ context.Context, ip string, headers http.Header) (*GeoInfo, error) {
+	info := CloudflareGeoFromHeaders(headers)
+	if info == nil {
+		return nil, nil
+	}
+	if info.IP == "" {
+		info.IP = ip
+	}
+	return info, nil
+}
+
+func (p ExternalGeoProvider) Lookup(ctx context.Context, ip string, _ http.Header) (*GeoInfo, error) {
+	return LookupGeoIP(ctx, p.cfg, ip)
+}
+
+func (p FallbackGeoProvider) Lookup(ctx context.Context, ip string, headers http.Header) (*GeoInfo, error) {
+	var lastErr error
+	for _, provider := range p.providers {
+		if provider == nil {
+			continue
+		}
+		info, err := provider.Lookup(ctx, ip, headers)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		if info != nil {
+			return info, nil
+		}
+	}
+	return nil, lastErr
+}
+
+func NewGeoProvider(cfg config.GeoIPConfig, baseDir string) GeoProvider {
+	if !cfg.Enabled {
+		return nil
+	}
+	providers := []GeoProvider{}
+	if cfg.PreferCloudflareHeaders {
+		providers = append(providers, CloudflareGeoProvider{})
+	}
+	if cfg.DBIP.Enabled {
+		providers = append(providers, NewDBIPProvider(cfg.DBIP, baseDir))
+	}
+	if cfg.URL != "" {
+		providers = append(providers, ExternalGeoProvider{cfg: cfg})
+	}
+	if len(providers) == 0 {
+		return nil
+	}
+	if len(providers) == 1 {
+		return providers[0]
+	}
+	return FallbackGeoProvider{providers: providers}
 }
 
 func stringField(payload map[string]any, keys ...string) string {
