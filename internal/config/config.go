@@ -72,6 +72,23 @@ type OnboardingConfig struct {
 	Instructions       struct {
 		IOS []string `json:"ios"`
 	} `json:"instructions"`
+	Pushover PushoverConfig `json:"pushover"`
+	GeoIP    GeoIPConfig    `json:"geoip"`
+}
+
+type PushoverConfig struct {
+	Enabled        bool   `json:"enabled"`
+	APIToken       string `json:"apiToken"`
+	UserKey        string `json:"userKey"`
+	Device         string `json:"device,omitempty"`
+	Sound          string `json:"sound,omitempty"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
+}
+
+type GeoIPConfig struct {
+	Enabled        bool   `json:"enabled"`
+	URL            string `json:"url"`
+	TimeoutSeconds int    `json:"timeoutSeconds"`
 }
 
 type User struct {
@@ -111,6 +128,15 @@ func Defaults() *Config {
 			LocalBypass:        true,
 			ProfileURL:         "/certs/rootCA.mobileconfig",
 			MacCertURL:         "/certs/rootCA.cer",
+			Pushover: PushoverConfig{
+				Enabled:        false,
+				TimeoutSeconds: 3,
+			},
+			GeoIP: GeoIPConfig{
+				Enabled:        true,
+				URL:            "https://ipapi.co/%s/json/",
+				TimeoutSeconds: 2,
+			},
 		},
 	}
 }

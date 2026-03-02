@@ -10,13 +10,13 @@
   .card { background: #fff; border-radius: 12px; box-shadow: 0 2px 12px rgba(0,0,0,0.1); padding: 2rem; max-width: 440px; width: 90%; }
   h1 { font-size: 1.5rem; margin-bottom: 0.5rem; text-align: center; }
   p { color: #666; margin-bottom: 1rem; text-align: center; }
-  .step { margin-bottom: 1.5rem; padding: 1rem; background: #fafafa; border-radius: 8px; }
-  .step h2 { font-size: 1.1rem; margin-bottom: 0.5rem; }
-  .step ol { padding-left: 1.2rem; color: #444; font-size: 0.9rem; line-height: 1.6; }
+  .note { margin-bottom: 1rem; padding: 0.85rem; background: #fafafa; border-radius: 8px; font-size: 0.9rem; color: #444; }
+  .note button { margin-top: 0.5rem; }
   button { background: #111; color: #fff; border: none; border-radius: 8px; padding: 0.75rem 1.5rem; font-size: 1rem; cursor: pointer; width: 100%; margin-bottom: 0.75rem; }
   button:hover { background: #333; }
   button.secondary { background: #666; }
-  input { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 8px; font-size: 1.2rem; text-align: center; letter-spacing: 0.3em; margin-bottom: 0.75rem; }
+  input { width: 100%; padding: 0.75rem; border: 1px solid #ddd; border-radius: 8px; font-size: 1.1rem; text-align: center; letter-spacing: 0.3em; margin-bottom: 0.75rem; }
+  .name-input { letter-spacing: normal; text-align: left; font-size: 0.95rem; }
   .error { color: #c00; margin-top: 0.5rem; text-align: center; }
   .success { color: #080; margin-top: 0.5rem; text-align: center; }
   .hidden { display: none; }
@@ -25,46 +25,31 @@
 <body>
 <div class="card">
   <h1>🔐 Bouncer Setup</h1>
-  <p>Welcome! Follow the steps below to get started.</p>
+  <p>Enter the admin code and create your passkey.</p>
 
-  <!-- Step 1: Trust (only in local TLS mode) -->
-  <div id="trust-step" class="step">
-    <h2>Step 1: Install Trust Certificate</h2>
-    <p style="text-align:left;font-size:0.9rem;color:#444;">Your device needs to trust the local CA before HTTPS will work.</p>
+  <div id="trust-step" class="note">
+    If you see a certificate warning, install the local trust profile once.
     <button onclick="window.location.href='/certs/rootCA.mobileconfig'">📱 Install iOS/macOS Profile</button>
     <button class="secondary" onclick="window.location.href='/certs/rootCA.cer'">💻 Download macOS Certificate</button>
-    <div class="step" style="margin-top:0.75rem;background:#f0f0f0;">
-      <h2 style="font-size:0.95rem;">iOS Trust Steps</h2>
-      <ol>
-        <li>Install the profile (Settings prompt)</li>
-        <li>Go to Settings → General → About → Certificate Trust Settings</li>
-        <li>Enable full trust for "Bouncer Local CA"</li>
-      </ol>
-    </div>
   </div>
 
-  <!-- Step 2: Token + Passkey -->
-  <div id="passkey-step" class="step">
-    <h2 id="step-title">Step 2: Create Passkey</h2>
-    <div id="token-group">
-      <input id="token-input" type="text" maxlength="6" pattern="[0-9]{6}" placeholder="000000" inputmode="numeric" autocomplete="off">
-    </div>
-    <input id="name-input" type="text" placeholder="Your name (optional)" style="letter-spacing:normal;text-align:left;font-size:0.95rem;">
-    <button id="register-btn">Create Passkey</button>
-    <div id="reg-error" class="error hidden"></div>
-    <div id="reg-success" class="success hidden"></div>
+  <div id="token-group">
+    <input id="token-input" type="text" maxlength="6" pattern="[0-9]{6}" placeholder="Admin code" inputmode="numeric" autocomplete="off">
   </div>
+  <input id="name-input" class="name-input" type="text" placeholder="Your name (optional)">
+  <button id="register-btn">Create Passkey</button>
+  <div id="reg-error" class="error hidden"></div>
+  <div id="reg-success" class="success hidden"></div>
 
   <hr style="margin:1rem 0;border:none;border-top:1px solid #eee;">
   <button class="secondary" onclick="window.location.href='/login'">Already have a passkey? Sign in</button>
 </div>
 
 <script type="module">
-// Hide trust step in Cloudflare mode.
+// Hide trust note in Cloudflare mode.
 const cfMeta = document.querySelector('meta[name="cloudflare"]');
 if (cfMeta && cfMeta.content === 'true') {
   document.getElementById('trust-step').classList.add('hidden');
-  document.getElementById('step-title').textContent = 'Create Passkey';
 }
 
 // Hide token input if local bypass is active (server tells us via meta).
@@ -91,7 +76,7 @@ async function register() {
       body: JSON.stringify({ token, displayName: name || 'User', name: name || '' }),
     });
     if (!optRes.ok) throw new Error(await optRes.text());
-    const { options, challengeId, userId, displayName: dn, name: n } = await optRes.json();
+    const { options, challengeId, userId } = await optRes.json();
 
     // Decode base64url fields.
     options.publicKey.challenge = base64urlToBuffer(options.publicKey.challenge);

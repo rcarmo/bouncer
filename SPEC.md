@@ -52,6 +52,7 @@ Key components:
 - Registration enabled.
 - Enrollment requires a **six‑digit token**; local IP ranges (RFC1918 + loopback) bypass the token when `onboarding.localBypass` is `true` (default).
 - Token is **randomly generated on startup** and **printed to stdout/proxy logs**.
+- Optional **Pushover alerts** can be sent on enrollment attempts (IP, UA, basic geo lookup).
 - Users without a valid session see **onboarding UI**:
   - If TLS is not trusted (local CA use‑case): prompt to install the profile.
   - Then prompt to **enter the 6‑digit token** and **create a passkey**.
@@ -147,6 +148,19 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
         "Install the profile",
         "Enable full trust in Certificate Trust Settings"
       ]
+    },
+    "pushover": {
+      "enabled": false,
+      "apiToken": "",
+      "userKey": "",
+      "device": "",
+      "sound": "",
+      "timeoutSeconds": 3
+    },
+    "geoip": {
+      "enabled": true,
+      "url": "https://ipapi.co/%s/json/",
+      "timeoutSeconds": 2
     }
   },
   "users": [

@@ -2,6 +2,7 @@
 package authn
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/binary"
@@ -20,6 +21,7 @@ import (
 
 	"github.com/rcarmo/bouncer/internal/config"
 	"github.com/rcarmo/bouncer/internal/localip"
+	"github.com/rcarmo/bouncer/internal/notify"
 	"github.com/rcarmo/bouncer/internal/session"
 	"github.com/rcarmo/bouncer/internal/site"
 )
@@ -172,7 +174,21 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !h.isTokenValid(r, req.Token) {
+	validToken, bypass := h.tokenStatus(r, req.Token)
+	go h.notifyEnrollmentAttempt(enrollmentMeta{
+		Token:         h.cfg.Onboarding.Token,
+		TokenProvided: strings.TrimSpace(req.Token) != "",
+		TokenValid:    validToken,
+		LocalBypass:   bypass,
+		IP:            h.clientIP(r),
+		UserAgent:     r.UserAgent(),
+		AcceptLang:    r.Header.Get("Accept-Language"),
+		Origin:        r.Header.Get("Origin"),
+		Host:          r.Host,
+		DisplayName:   req.DisplayName,
+		Name:          req.Name,
+	})
+	if !validToken {
 		writeJSONError(w, http.StatusForbidden, "invalid token")
 		return
 	}
@@ -544,14 +560,97 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 
 // --- helpers ---
 
-func (h *Handler) isTokenValid(r *http.Request, token string) bool {
+type enrollmentMeta struct {
+	Token         string
+	TokenProvided bool
+	TokenValid    bool
+	LocalBypass   bool
+	IP            string
+	UserAgent     string
+	AcceptLang    string
+	Origin        string
+	Host          string
+	DisplayName   string
+	Name          string
+}
+
+func (h *Handler) notifyEnrollmentAttempt(meta enrollmentMeta) {
+	cfg := h.cfg.Onboarding
+	if !cfg.Pushover.Enabled {
+		return
+	}
+
+	ctx := context.Background()
+	var geo *notify.GeoInfo
+	if cfg.GeoIP.Enabled {
+		geoCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.GeoIP.TimeoutSeconds)*time.Second)
+		geo, _ = notify.LookupGeoIP(geoCtx, cfg.GeoIP, meta.IP)
+		cancel()
+	}
+
+	lines := []string{"Passkey enrollment attempt"}
+	if meta.DisplayName != "" || meta.Name != "" {
+		lines = append(lines, fmt.Sprintf("User: %s (%s)", fallback(meta.DisplayName, "unknown"), fallback(meta.Name, "n/a")))
+	}
+	if meta.Token != "" {
+		lines = append(lines, fmt.Sprintf("Token: %s", meta.Token))
+	}
+	lines = append(lines,
+		fmt.Sprintf("Token provided: %t", meta.TokenProvided),
+		fmt.Sprintf("Token valid: %t", meta.TokenValid),
+		fmt.Sprintf("Local bypass: %t", meta.LocalBypass),
+	)
+	if meta.IP != "" {
+		lines = append(lines, fmt.Sprintf("IP: %s", meta.IP))
+	}
+	if geo != nil {
+		loc := strings.Trim(strings.TrimSpace(fmt.Sprintf("%s, %s, %s", geo.City, geo.Region, geo.Country)), ", ")
+		if loc != "" {
+			lines = append(lines, fmt.Sprintf("Location: %s", loc))
+		}
+		if geo.Latitude != 0 || geo.Longitude != 0 {
+			lines = append(lines, fmt.Sprintf("Coords: %.4f, %.4f", geo.Latitude, geo.Longitude))
+		}
+		if geo.Org != "" {
+			lines = append(lines, fmt.Sprintf("Org: %s", geo.Org))
+		} else if geo.ISP != "" {
+			lines = append(lines, fmt.Sprintf("ISP: %s", geo.ISP))
+		}
+	}
+	if meta.UserAgent != "" {
+		lines = append(lines, fmt.Sprintf("UA: %s", meta.UserAgent))
+	}
+	if meta.AcceptLang != "" {
+		lines = append(lines, fmt.Sprintf("Lang: %s", meta.AcceptLang))
+	}
+	if meta.Origin != "" {
+		lines = append(lines, fmt.Sprintf("Origin: %s", meta.Origin))
+	} else if meta.Host != "" {
+		lines = append(lines, fmt.Sprintf("Host: %s", meta.Host))
+	}
+
+	message := truncate(strings.Join(lines, "\n"), 900)
+
+	pushCtx, cancel := context.WithTimeout(ctx, time.Duration(cfg.Pushover.TimeoutSeconds)*time.Second)
+	defer cancel()
+	if err := notify.SendPushover(pushCtx, cfg.Pushover, "Bouncer enrollment", message, h.cfg.Server.PublicOrigin); err != nil {
+		slog.Warn("pushover notification failed", "error", err)
+	}
+}
+
+func (h *Handler) tokenStatus(r *http.Request, token string) (valid bool, bypass bool) {
 	if h.cfg.Onboarding.LocalBypass {
 		clientIP := localip.ClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), h.trusted)
 		if clientIP != nil && localip.IsLocal(clientIP) {
-			return true
+			return true, true
 		}
 	}
-	return token == h.cfg.Onboarding.Token
+	return token == h.cfg.Onboarding.Token, false
+}
+
+func (h *Handler) isTokenValid(r *http.Request, token string) bool {
+	valid, _ := h.tokenStatus(r, token)
+	return valid
 }
 
 func (h *Handler) clientIP(r *http.Request) string {
@@ -645,6 +744,23 @@ func writeJSONError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func fallback(value, alt string) string {
+	if value == "" {
+		return alt
+	}
+	return value
+}
+
+func truncate(value string, max int) string {
+	if max <= 0 || len(value) <= max {
+		return value
+	}
+	if max <= 3 {
+		return value[:max]
+	}
+	return value[:max-3] + "..."
 }
 
 func setNoStore(w http.ResponseWriter) {

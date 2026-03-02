@@ -12,6 +12,7 @@ A Go-based reverse proxy that protects backend HTTP services with [WebAuthn](htt
 - **Cloudflare Tunnel mode** — skip local TLS entirely, use Cloudflare for HTTPS
 - **Single JSON config** — config + user DB in one file; sessions in a separate file
 - **6-digit enrollment token** — printed to stdout, with local-IP bypass
+- **Enrollment alerts** — optional Pushover notifications with IP/UA/geo info
 - **Transparent reverse proxy** — authenticated users are forwarded to the backend seamlessly
 - **Static binary** — single Go binary, Docker-ready
 - **Multi-site support** — host-based routing to multiple backends in one instance
@@ -68,7 +69,7 @@ Flags:
 ## How It Works
 
 1. **Normal mode**: users must authenticate with a passkey to access the backend.
-2. **Onboarding mode** (`--onboarding`): new users can register a passkey using a 6-digit token (printed to logs). Local network users can bypass the token.
+2. **Onboarding mode** (`--onboarding`): new users can register a passkey using a 6-digit token (printed to logs). Local network users can bypass the token. Optional Pushover alerts can be sent with IP/UA + basic geolocation.
 3. **Cloudflare mode** (`--cloudflare`): Cloudflare provides HTTPS; Bouncer skips TLS and certificate onboarding.
 
 Sessions expire after 7 days (configurable) and are persisted across restarts.
@@ -134,6 +135,28 @@ Notes:
 - In Cloudflare mode, set `publicOrigin`/`rpID` per site to the Cloudflare hostname.
 
 See [SPEC.md](SPEC.md) for the full JSON schema and configuration reference.
+
+### Onboarding notifications (optional)
+
+```json
+{
+  "onboarding": {
+    "enabled": true,
+    "pushover": {
+      "enabled": true,
+      "apiToken": "pushover-app-token",
+      "userKey": "pushover-user-key",
+      "device": "iphone",
+      "sound": "pushover"
+    },
+    "geoip": {
+      "enabled": true,
+      "url": "https://ipapi.co/%s/json/",
+      "timeoutSeconds": 2
+    }
+  }
+}
+```
 
 ## Architecture
 
