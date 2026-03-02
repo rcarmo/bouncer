@@ -115,6 +115,9 @@ func main() {
 	}
 
 	// Parse trusted proxies.
+	if cfg.Server.Cloudflare {
+		cfg.Server.TrustedProxies = uniqueStrings(append(cfg.Server.TrustedProxies, "127.0.0.1/32", "::1/128"))
+	}
 	trustedNets, err := localip.ParseTrustedProxies(cfg.Server.TrustedProxies)
 	if err != nil {
 		slog.Error("failed to parse trusted proxies", "error", err)

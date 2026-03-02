@@ -63,7 +63,7 @@ Key components:
 - Cloudflare Tunnel provides the public HTTPS hostname + certs.
 - `rpID` and `publicOrigin` must be set to the **Cloudflare hostname** (not the local address).
 - Onboarding UI **skips certificate/profile installation** and goes directly to passkey registration/login.
-- Bouncer trusts `X-Forwarded-Proto` only from IPs listed in `server.trustedProxies` (default: Cloudflare IP ranges).
+- Bouncer trusts `X-Forwarded-Proto` only from IPs listed in `server.trustedProxies` (loopback is auto-trusted in Cloudflare mode).
 
 ---
 
@@ -160,7 +160,8 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
     "geoip": {
       "enabled": true,
       "url": "https://ipapi.co/%s/json/",
-      "timeoutSeconds": 2
+      "timeoutSeconds": 2,
+      "cacheTtlSeconds": 3600
     }
   },
   "users": [
@@ -187,7 +188,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - `publicOrigin` must match the hostname used by browsers.
 - `rpID` should be the eTLD+1 or host portion of `publicOrigin`. In Cloudflare mode, this is the **Cloudflare hostname**, not the local address.
 - `hostnames`/`ipAddresses` define TLS SANs; they can be set in config or overridden via CLI.
-- `trustedProxies`: CIDR list. `X-Forwarded-*` headers are only trusted from these IPs. Empty = trust nothing (direct mode). Set to Cloudflare ranges when using `--cloudflare`.
+- `trustedProxies`: CIDR list. `X-Forwarded-*` headers are only trusted from these IPs. Empty = trust nothing (direct mode). In Cloudflare mode, loopback is auto-trusted; add Cloudflare ranges if you terminate upstream.
 - In Cloudflare mode, `tls` may be omitted.
 - If `sites` is set, each site defines its own `publicOrigin`, `rpID`, and `backend`. CLI overrides for `--backend`, `--hostname`, and `--ip` are ignored in multi-site mode.
 - `session.ttlDays`: sessions expire after this many days (default 7); user must re‑authenticate with passkey.
@@ -392,7 +393,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - CA/cert generation using `crypto/x509`, `crypto/ecdsa`, `crypto/rand`, and `encoding/pem`.
 - Token generation: 6‑digit via `crypto/rand` (uniform 000000–999999).
 - Mobileconfig generation: minimal XML template with UUIDs generated via `crypto/rand`.
-- Local IP detection: parse `RemoteAddr` (or `X-Forwarded-For` when sender is in `trustedProxies`) and match against RFC1918/loopback CIDRs.
+- Local IP detection: parse `RemoteAddr` (or `CF-Connecting-IP`/`True-Client-IP`/`X-Forwarded-For` when sender is trusted) and match against RFC1918/loopback CIDRs.
 - Session file: loaded into in-memory map on startup; flushed to disk on changes + periodic sync.
 - Token validation: checked in `POST /webauthn/register/options` before issuing a challenge.
 

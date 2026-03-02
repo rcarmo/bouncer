@@ -640,7 +640,7 @@ func (h *Handler) notifyEnrollmentAttempt(meta enrollmentMeta) {
 
 func (h *Handler) tokenStatus(r *http.Request, token string) (valid bool, bypass bool) {
 	if h.cfg.Onboarding.LocalBypass {
-		clientIP := localip.ClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), h.trusted)
+		clientIP := localip.ClientIPFromRequest(r, h.trusted)
 		if clientIP != nil && localip.IsLocal(clientIP) {
 			return true, true
 		}
@@ -654,7 +654,7 @@ func (h *Handler) isTokenValid(r *http.Request, token string) bool {
 }
 
 func (h *Handler) clientIP(r *http.Request) string {
-	ip := localip.ClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), h.trusted)
+	ip := localip.ClientIPFromRequest(r, h.trusted)
 	if ip == nil {
 		return ""
 	}

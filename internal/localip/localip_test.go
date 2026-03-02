@@ -2,6 +2,7 @@ package localip
 
 import (
 	"net"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -99,5 +100,17 @@ func TestClientIP(t *testing.T) {
 	ip = ClientIP("10.0.0.1:1234", "1.2.3.4", nil)
 	if ip.String() != "10.0.0.1" {
 		t.Errorf("expected 10.0.0.1 (no trusted), got %s", ip)
+	}
+}
+
+func TestClientIPFromRequestCloudflare(t *testing.T) {
+	trusted, _ := ParseTrustedProxies([]string{"127.0.0.1/32"})
+	req := httptest.NewRequest("GET", "http://example.com", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("CF-Connecting-IP", "203.0.113.10")
+
+	ip := ClientIPFromRequest(req, trusted)
+	if ip == nil || ip.String() != "203.0.113.10" {
+		t.Fatalf("expected 203.0.113.10, got %v", ip)
 	}
 }

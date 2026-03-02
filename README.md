@@ -152,7 +152,8 @@ See [SPEC.md](SPEC.md) for the full JSON schema and configuration reference.
     "geoip": {
       "enabled": true,
       "url": "https://ipapi.co/%s/json/",
-      "timeoutSeconds": 2
+      "timeoutSeconds": 2,
+      "cacheTtlSeconds": 3600
     }
   }
 }

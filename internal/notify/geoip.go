@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/rcarmo/bouncer/internal/config"
@@ -23,10 +24,33 @@ type GeoInfo struct {
 	ISP       string
 }
 
+type geoCacheEntry struct {
+	info    *GeoInfo
+	expires time.Time
+}
+
+var geoCache = struct {
+	mu      sync.Mutex
+	entries map[string]geoCacheEntry
+}{entries: make(map[string]geoCacheEntry)}
+
 // LookupGeoIP performs a basic geolocation lookup for an IP.
 func LookupGeoIP(ctx context.Context, cfg config.GeoIPConfig, ip string) (*GeoInfo, error) {
 	if !cfg.Enabled || cfg.URL == "" || ip == "" {
 		return nil, nil
+	}
+
+	ttl := time.Duration(cfg.CacheTTLSeconds) * time.Second
+	if ttl > 0 {
+		geoCache.mu.Lock()
+		if entry, ok := geoCache.entries[ip]; ok {
+			if time.Now().Before(entry.expires) {
+				geoCache.mu.Unlock()
+				return entry.info, nil
+			}
+			delete(geoCache.entries, ip)
+		}
+		geoCache.mu.Unlock()
 	}
 
 	url := fmt.Sprintf(cfg.URL, ip)
@@ -69,6 +93,11 @@ func LookupGeoIP(ctx context.Context, cfg config.GeoIPConfig, ip string) (*GeoIn
 	info.ISP = stringField(payload, "isp")
 	if info.IP == "" {
 		info.IP = ip
+	}
+	if ttl > 0 {
+		geoCache.mu.Lock()
+		geoCache.entries[ip] = geoCacheEntry{info: info, expires: time.Now().Add(ttl)}
+		geoCache.mu.Unlock()
 	}
 	return info, nil
 }

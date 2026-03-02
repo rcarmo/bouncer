@@ -23,6 +23,9 @@ func TestDefaults(t *testing.T) {
 	if !cfg.Onboarding.RotateTokenOnStart {
 		t.Error("expected rotateTokenOnStart true")
 	}
+	if cfg.Onboarding.GeoIP.CacheTTLSeconds <= 0 {
+		t.Error("expected geoip cache ttl to be set")
+	}
 }
 
 func TestLoadCreatesDefault(t *testing.T) {

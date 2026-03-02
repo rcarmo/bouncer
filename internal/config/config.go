@@ -86,9 +86,10 @@ type PushoverConfig struct {
 }
 
 type GeoIPConfig struct {
-	Enabled        bool   `json:"enabled"`
-	URL            string `json:"url"`
-	TimeoutSeconds int    `json:"timeoutSeconds"`
+	Enabled         bool   `json:"enabled"`
+	URL             string `json:"url"`
+	TimeoutSeconds  int    `json:"timeoutSeconds"`
+	CacheTTLSeconds int    `json:"cacheTtlSeconds"`
 }
 
 type User struct {
@@ -133,9 +134,10 @@ func Defaults() *Config {
 				TimeoutSeconds: 3,
 			},
 			GeoIP: GeoIPConfig{
-				Enabled:        true,
-				URL:            "https://ipapi.co/%s/json/",
-				TimeoutSeconds: 2,
+				Enabled:         true,
+				URL:             "https://ipapi.co/%s/json/",
+				TimeoutSeconds:  2,
+				CacheTTLSeconds: 3600,
 			},
 		},
 	}

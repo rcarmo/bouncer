@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"time"
 
 	"github.com/rcarmo/bouncer/internal/localip"
 )
@@ -19,7 +20,13 @@ func New(backendURL string, trusted []*net.IPNet) (*httputil.ReverseProxy, error
 		return nil, err
 	}
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.DisableCompression = true
+	transport.ForceAttemptHTTP2 = false
+
 	proxy := &httputil.ReverseProxy{
+		Transport:     transport,
+		FlushInterval: 100 * time.Millisecond,
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)
 
