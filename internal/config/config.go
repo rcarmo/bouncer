@@ -154,7 +154,7 @@ func Defaults() *Config {
 				CacheTTLSeconds:         3600,
 				PreferCloudflareHeaders: true,
 				DBIP: DBIPConfig{
-					Enabled:                false,
+					Enabled:                true,
 					DatabasePath:           "dbip-city-lite.sqlite",
 					AutoUpdate:             true,
 					UpdateIntervalHours:    24,

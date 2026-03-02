@@ -50,13 +50,12 @@ func NewDBIPProvider(cfg config.DBIPConfig, baseDir string) GeoProvider {
 		dbPath: dbPath,
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), provider.downloadTimeout())
-	defer cancel()
-	if err := provider.ensureDB(ctx, false); err != nil {
-		slog.Warn("dbip init failed", "error", err)
+	if err := provider.openExistingDB(); err != nil && !errors.Is(err, os.ErrNotExist) {
+		slog.Warn("dbip open failed", "error", err)
 	}
 
 	if cfg.AutoUpdate {
+		go provider.updateOnce()
 		go provider.autoUpdateLoop()
 	}
 
@@ -161,6 +160,14 @@ func (p *DBIPProvider) ensureDB(ctx context.Context, force bool) error {
 		return err
 	}
 	return p.openExistingDB()
+}
+
+func (p *DBIPProvider) updateOnce() {
+	ctx, cancel := context.WithTimeout(context.Background(), p.downloadTimeout())
+	defer cancel()
+	if err := p.ensureDB(ctx, true); err != nil {
+		slog.Warn("dbip update failed", "error", err)
+	}
 }
 
 func (p *DBIPProvider) autoUpdateLoop() {

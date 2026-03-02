@@ -32,6 +32,9 @@ func TestDefaults(t *testing.T) {
 	if !cfg.Onboarding.GeoIP.PreferCloudflareHeaders {
 		t.Error("expected geoip preferCloudflareHeaders true")
 	}
+	if !cfg.Onboarding.GeoIP.DBIP.Enabled {
+		t.Error("expected dbip enabled true")
+	}
 	if cfg.Onboarding.GeoIP.DBIP.UpdatePageURL == "" {
 		t.Error("expected dbip updatePageUrl to be set")
 	}

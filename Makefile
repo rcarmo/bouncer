@@ -69,19 +69,10 @@ install-dev: ## Install dev tools (golangci-lint, gosec)
 
 .PHONY: lint
 lint: ## Run linters
+	@$(MAKE) install-dev
 	go vet ./...
-	@if command -v golangci-lint >/dev/null 2>&1; then \
-		GOTOOLCHAIN=$(LINT_TOOLCHAIN) golangci-lint run ./...; \
-	else \
-		echo "golangci-lint not installed; run make install-dev"; \
-		exit 1; \
-	fi
-	@if command -v gosec >/dev/null 2>&1; then \
-		GOTOOLCHAIN=$(LINT_TOOLCHAIN) gosec ./...; \
-	else \
-		echo "gosec not installed; run make install-dev"; \
-		exit 1; \
-	fi
+	GOTOOLCHAIN=$(LINT_TOOLCHAIN) golangci-lint run ./...
+	GOTOOLCHAIN=$(LINT_TOOLCHAIN) gosec ./...
 
 .PHONY: format
 format: ## Format code
