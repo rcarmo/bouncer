@@ -14,7 +14,7 @@ Configuration and user data live in a **single JSON file**. Sessions are persist
 - Optional **simplified mode** via Cloudflare Tunnel (no local TLS or profiles).
 
 ## Non‑Goals
-- Multi-tenant or multi‑backend routing.
+- Path-prefix routing or HTML/API URL rewriting. Multi-backend support is host-based via `sites[]`.
 - External DB dependencies.
 - Enterprise IAM features (SAML/OIDC, RBAC, SCIM).
 
@@ -102,6 +102,50 @@ flowchart LR
 2. After installing the CA, the user returns to `https://bouncer.local/onboarding`.
 3. Bouncer validates the token (or local bypass) and registers the passkey.
 4. Authenticated requests are forwarded to the backend.
+
+---
+
+## Piclaw / Long-Lived Connection Proxying
+
+Bouncer is designed to protect apps such as Piclaw without URL rewriting:
+
+- Use **host-based routing** (`sites[]`) instead of path prefixes.
+- Preserve `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-For` for trusted upstream proxies.
+- Do not buffer proxied responses; Go's `httputil.ReverseProxy` is configured with a short flush interval.
+- Leave server write timeout disabled so Piclaw's `/sse/stream` and WebSocket upgrades can stay open.
+- WebSocket upgrades are passed through by the standard reverse proxy.
+
+This means a Piclaw instance can remain unaware of Bouncer as long as Piclaw is configured with:
+
+```env
+PICLAW_TRUST_PROXY=true
+PICLAW_WEB_EXTERNAL_URL=https://piclaw-instance.example.com
+```
+
+---
+
+## Hot Reload
+
+Send `SIGHUP` to reload `bouncer.json` without dropping the listener:
+
+```bash
+kill -HUP $(pidof bouncer)
+```
+
+Reloadable:
+
+- `sites[]` additions/removals/hostname changes
+- site `backend` URLs
+- `trustedProxies`
+- onboarding settings
+- local TLS SAN/certificate material for newly-added hostnames
+
+Not reloadable without restart:
+
+- listen address (`server.listen`)
+- Cloudflare/local-TLS mode (`server.cloudflare`)
+
+Existing proxied SSE/WebSocket connections keep using their already-selected backend. New requests use the reloaded routing/auth state.
 
 ---
 

@@ -25,7 +25,9 @@ func New(backendURL string, trusted []*net.IPNet) (*httputil.ReverseProxy, error
 	transport.ForceAttemptHTTP2 = false
 
 	proxy := &httputil.ReverseProxy{
-		Transport:     transport,
+		Transport: transport,
+		// Flush frequently so EventSource/SSE streams reach the browser without
+		// buffering. WebSocket upgrades are passed through by ReverseProxy.
 		FlushInterval: 100 * time.Millisecond,
 		Rewrite: func(r *httputil.ProxyRequest) {
 			r.SetURL(target)

@@ -13,9 +13,10 @@ A Go-based reverse proxy that protects backend HTTP services with [WebAuthn](htt
 - **Single JSON config** — config + user DB in one file; sessions in a separate file
 - **One-time enrollment token** — 6 digits, issued on demand, logged + optional Pushover; local-IP bypass supported
 - **Enrollment alerts** — optional Pushover notifications with IP/UA/geo info
-- **Transparent reverse proxy** — authenticated users are forwarded to the backend seamlessly
+- **Transparent reverse proxy** — authenticated users are forwarded to the backend seamlessly, including long-lived SSE streams and WebSocket upgrades
 - **Static binary** — single Go binary, Docker-ready
 - **Multi-site support** — host-based routing to multiple backends in one instance
+- **Hot-reloadable routing config** — send `SIGHUP` to reload hostnames/sites/backends without restarting
 
 ## Quick Start
 
@@ -81,7 +82,8 @@ Sessions expire after 7 days (configurable) and are persisted across restarts.
 - Sessions are **bound to the resolved site** in multi-site mode.
 - Session cookies are marked **Secure** when requests are HTTPS (or forwarded HTTPS via trusted proxies).
 - HSTS is emitted for HTTPS responses.
-- WebAuthn responses are **no-store** and servers use **read/write timeouts** to mitigate slowloris attacks.
+- WebAuthn responses are **no-store** and servers use **read-header/read timeouts** plus max header size to mitigate slowloris attacks.
+- Write timeouts are intentionally disabled because proxied apps such as Piclaw use long-lived SSE streams and WebSocket upgrades.
 
 ## Configuration
 
@@ -134,6 +136,29 @@ Notes:
 - If `sites` is present, **CLI overrides** for `--backend`, `--hostname`, and `--ip` are ignored.
 - In local TLS mode, Bouncer **aggregates SANs** from all sites when generating the server certificate.
 - In Cloudflare mode, set `publicOrigin`/`rpID` per site to the Cloudflare hostname.
+
+### Hot reload
+
+Bouncer reloads routing/auth/proxy configuration on `SIGHUP`:
+
+```bash
+kill -HUP $(pidof bouncer)
+```
+
+Reloadable without restart:
+
+- `sites[]` additions/removals/hostname changes
+- site `backend` URLs
+- `trustedProxies`
+- onboarding flags and token settings
+- local TLS SANs/certificate material for new hostnames
+
+Not reloadable without restart:
+
+- listen address (`server.listen`)
+- Cloudflare-vs-local-TLS mode (`server.cloudflare`)
+
+This is intended for adding more hostnames/backends while keeping existing SSE and WebSocket sessions alive.
 
 See [SPEC.md](SPEC.md) for the full JSON schema and configuration reference.
 

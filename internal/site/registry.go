@@ -14,11 +14,11 @@ import (
 
 // Registry resolves incoming requests to a site configuration.
 type Registry struct {
-	Sites   []*config.SiteConfig
-	byHost  map[string]*config.SiteConfig
-	byID    map[string]*config.SiteConfig
+	Sites       []*config.SiteConfig
+	byHost      map[string]*config.SiteConfig
+	byID        map[string]*config.SiteConfig
 	defaultSite *config.SiteConfig
-	trusted []*net.IPNet
+	trusted     []*net.IPNet
 }
 
 // New builds a registry from config, supporting single- or multi-site mode.
@@ -26,12 +26,12 @@ func New(cfg *config.Config, trusted []*net.IPNet) (*Registry, error) {
 	sites := make([]*config.SiteConfig, 0)
 	if len(cfg.Sites) == 0 {
 		s := &config.SiteConfig{
-			ID:          "default",
+			ID:           "default",
 			PublicOrigin: cfg.Server.PublicOrigin,
-			RPID:        cfg.Server.RPID,
-			Backend:     cfg.Server.Backend,
-			Hostnames:   append([]string(nil), cfg.Server.Hostnames...),
-			IPAddresses: append([]string(nil), cfg.Server.IPAddresses...),
+			RPID:         cfg.Server.RPID,
+			Backend:      cfg.Server.Backend,
+			Hostnames:    append([]string(nil), cfg.Server.Hostnames...),
+			IPAddresses:  append([]string(nil), cfg.Server.IPAddresses...),
 		}
 		sites = append(sites, s)
 	} else {

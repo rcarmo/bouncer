@@ -52,6 +52,8 @@ type Handler struct {
 	rateLimit     int
 	rateWindow    time.Duration
 	blockDuration time.Duration
+
+	stopCleanup chan struct{}
 }
 
 // challengeEntry stores a challenge with its expiry time.
@@ -106,10 +108,25 @@ func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *s
 		rateLimit:     20,
 		rateWindow:    time.Minute,
 		blockDuration: 5 * time.Minute,
+		stopCleanup:   make(chan struct{}),
 	}
 	// Start challenge cleanup goroutine.
 	go h.cleanupChallenges()
 	return h, nil
+}
+
+// Close stops background cleanup work. It is used when hot-reloading the
+// handler so SIGHUP does not leave old cleanup goroutines behind.
+func (h *Handler) Close() {
+	if h == nil || h.stopCleanup == nil {
+		return
+	}
+	select {
+	case <-h.stopCleanup:
+		return
+	default:
+		close(h.stopCleanup)
+	}
 }
 
 // --- WebAuthn User adapter ---
@@ -1005,26 +1022,31 @@ func randomChallengeID() (string, error) {
 func (h *Handler) cleanupChallenges() {
 	ticker := time.NewTicker(1 * time.Minute)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		h.mu.Lock()
-		for id, entry := range h.challenges {
-			if now.After(entry.expires) {
-				delete(h.challenges, id)
+	for {
+		select {
+		case <-ticker.C:
+			now := time.Now()
+			h.mu.Lock()
+			for id, entry := range h.challenges {
+				if now.After(entry.expires) {
+					delete(h.challenges, id)
+				}
 			}
-		}
-		h.mu.Unlock()
+			h.mu.Unlock()
 
-		h.rateMu.Lock()
-		for ip, entry := range h.rate {
-			if entry == nil {
-				delete(h.rate, ip)
-				continue
+			h.rateMu.Lock()
+			for ip, entry := range h.rate {
+				if entry == nil {
+					delete(h.rate, ip)
+					continue
+				}
+				if !entry.lastSeen.IsZero() && now.Sub(entry.lastSeen) > h.rateWindow && now.After(entry.blockedUntil) {
+					delete(h.rate, ip)
+				}
 			}
-			if !entry.lastSeen.IsZero() && now.Sub(entry.lastSeen) > h.rateWindow && now.After(entry.blockedUntil) {
-				delete(h.rate, ip)
-			}
+			h.rateMu.Unlock()
+		case <-h.stopCleanup:
+			return
 		}
-		h.rateMu.Unlock()
 	}
 }
