@@ -17,6 +17,7 @@ A Go-based reverse proxy that protects backend HTTP services with [WebAuthn](htt
 - **Static binary** — single Go binary, Docker-ready
 - **Multi-site support** — host-based routing to multiple backends in one instance
 - **Hot-reloadable routing config** — send `SIGHUP` to reload hostnames/sites/backends without restarting
+- **LAN discovery and aliases** — optional mDNS/Bonjour announcements and per-site listener ports
 
 ## Quick Start
 
@@ -136,6 +137,41 @@ Notes:
 - If `sites` is present, **CLI overrides** for `--backend`, `--hostname`, and `--ip` are ignored.
 - In local TLS mode, Bouncer **aggregates SANs** from all sites when generating the server certificate.
 - In Cloudflare mode, set `publicOrigin`/`rpID` per site to the Cloudflare hostname.
+
+### LAN port aliases and mDNS
+
+For environments where you cannot control LAN DNS/DHCP, each site can bind an extra listener port and Bouncer can advertise Bonjour/mDNS service records:
+
+```json
+{
+  "server": {
+    "listen": ":443",
+    "mdns": { "enabled": true, "service": "_https._tcp", "domain": "local." }
+  },
+  "sites": [
+    {
+      "id": "smith-lan",
+      "publicOrigin": "https://192.168.1.50:8441",
+      "rpID": "192.168.1.50",
+      "backend": "http://127.0.0.1:8081",
+      "hostnames": ["192.168.1.50"],
+      "ipAddresses": ["192.168.1.50"],
+      "listen": ":8441"
+    },
+    {
+      "id": "jones-lan",
+      "publicOrigin": "https://192.168.1.50:8442",
+      "rpID": "192.168.1.50",
+      "backend": "http://127.0.0.1:8082",
+      "hostnames": ["192.168.1.50"],
+      "ipAddresses": ["192.168.1.50"],
+      "listen": ":8442"
+    }
+  ]
+}
+```
+
+This gives no-DNS LAN URLs such as `https://192.168.1.50:8441` and `https://192.168.1.50:8442`. mDNS advertises discoverable services for Bonjour-aware clients, but ordinary browsers still need a URL/bookmark; mDNS service discovery is not the same as wildcard DNS aliases.
 
 ### Hot reload
 

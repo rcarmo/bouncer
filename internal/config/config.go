@@ -25,15 +25,24 @@ type Config struct {
 }
 
 type ServerConfig struct {
-	Listen         string    `json:"listen"`
-	PublicOrigin   string    `json:"publicOrigin"`
-	RPID           string    `json:"rpID"`
-	Backend        string    `json:"backend"`
-	Hostnames      []string  `json:"hostnames"`
-	IPAddresses    []string  `json:"ipAddresses"`
-	TrustedProxies []string  `json:"trustedProxies"`
-	TLS            TLSConfig `json:"tls"`
-	Cloudflare     bool      `json:"cloudflare"`
+	Listen         string     `json:"listen"`
+	PublicOrigin   string     `json:"publicOrigin"`
+	RPID           string     `json:"rpID"`
+	Backend        string     `json:"backend"`
+	Hostnames      []string   `json:"hostnames"`
+	IPAddresses    []string   `json:"ipAddresses"`
+	TrustedProxies []string   `json:"trustedProxies"`
+	TLS            TLSConfig  `json:"tls"`
+	Cloudflare     bool       `json:"cloudflare"`
+	MDNS           MDNSConfig `json:"mdns"`
+}
+
+// MDNSConfig controls Bonjour/mDNS service announcements for local discovery.
+type MDNSConfig struct {
+	Enabled        bool   `json:"enabled"`
+	Service        string `json:"service"`
+	Domain         string `json:"domain"`
+	InstancePrefix string `json:"instancePrefix"`
 }
 
 // SiteConfig defines a single public site and its backend.
@@ -44,6 +53,7 @@ type SiteConfig struct {
 	Backend      string   `json:"backend"`
 	Hostnames    []string `json:"hostnames"`
 	IPAddresses  []string `json:"ipAddresses"`
+	Listen       string   `json:"listen,omitempty"`
 }
 
 type TLSConfig struct {
@@ -130,6 +140,11 @@ func Defaults() *Config {
 			RPID:         "bouncer.local",
 			Backend:      "http://127.0.0.1:3000",
 			Hostnames:    []string{"bouncer.local"},
+			MDNS: MDNSConfig{
+				Enabled: false,
+				Service: "_https._tcp",
+				Domain:  "local.",
+			},
 		},
 		Session: SessionConfig{
 			TTLDays:    7,

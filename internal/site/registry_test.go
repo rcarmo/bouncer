@@ -99,3 +99,42 @@ func TestRegistryUsesForwardedHostFromTrustedProxy(t *testing.T) {
 		t.Fatalf("expected site-b via X-Forwarded-Host, got %+v", s)
 	}
 }
+
+func TestRegistryPortAliasesAllowSameHostOnDifferentPorts(t *testing.T) {
+	cfg := config.Defaults()
+	cfg.Sites = []config.SiteConfig{
+		{
+			ID:           "smith-lan",
+			PublicOrigin: "https://192.168.1.50:8441",
+			RPID:         "192.168.1.50",
+			Backend:      "http://127.0.0.1:8081",
+			Hostnames:    []string{"192.168.1.50"},
+			Listen:       ":8441",
+		},
+		{
+			ID:           "jones-lan",
+			PublicOrigin: "https://192.168.1.50:8442",
+			RPID:         "192.168.1.50",
+			Backend:      "http://127.0.0.1:8082",
+			Hostnames:    []string{"192.168.1.50"},
+			Listen:       ":8442",
+		},
+	}
+
+	reg, err := New(cfg, nil)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	reqSmith := httptest.NewRequest("GET", "https://192.168.1.50:8441/", nil)
+	reqSmith.Host = "192.168.1.50:8441"
+	if s := reg.Resolve(reqSmith); s == nil || s.ID != "smith-lan" {
+		t.Fatalf("expected smith-lan, got %+v", s)
+	}
+
+	reqJones := httptest.NewRequest("GET", "https://192.168.1.50:8442/", nil)
+	reqJones.Host = "192.168.1.50:8442"
+	if s := reg.Resolve(reqJones); s == nil || s.ID != "jones-lan" {
+		t.Fatalf("expected jones-lan, got %+v", s)
+	}
+}

@@ -16,6 +16,7 @@ import (
 type Registry struct {
 	Sites       []*config.SiteConfig
 	byHost      map[string]*config.SiteConfig
+	byHostPort  map[string]*config.SiteConfig
 	byID        map[string]*config.SiteConfig
 	defaultSite *config.SiteConfig
 	trusted     []*net.IPNet
@@ -42,10 +43,11 @@ func New(cfg *config.Config, trusted []*net.IPNet) (*Registry, error) {
 	}
 
 	reg := &Registry{
-		Sites:   sites,
-		byHost:  make(map[string]*config.SiteConfig),
-		byID:    make(map[string]*config.SiteConfig),
-		trusted: trusted,
+		Sites:      sites,
+		byHost:     make(map[string]*config.SiteConfig),
+		byHostPort: make(map[string]*config.SiteConfig),
+		byID:       make(map[string]*config.SiteConfig),
+		trusted:    trusted,
 	}
 
 	for _, s := range sites {
@@ -76,9 +78,25 @@ func New(cfg *config.Config, trusted []*net.IPNet) (*Registry, error) {
 		}
 
 		reg.byID[s.ID] = s
+		listenPort := listenPort(s.Listen)
 		for _, h := range s.Hostnames {
 			nh := normalizeHost(h)
 			if nh == "" {
+				continue
+			}
+			if hp := normalizeHostPort(h); hp != "" && strings.Contains(hp, ":") {
+				if existing, ok := reg.byHostPort[hp]; ok && existing.ID != s.ID {
+					return nil, fmt.Errorf("hostname/port %q assigned to multiple sites", hp)
+				}
+				reg.byHostPort[hp] = s
+				continue
+			}
+			if listenPort != "" {
+				hp := nh + ":" + listenPort
+				if existing, ok := reg.byHostPort[hp]; ok && existing.ID != s.ID {
+					return nil, fmt.Errorf("hostname/port %q assigned to multiple sites", hp)
+				}
+				reg.byHostPort[hp] = s
 				continue
 			}
 			if existing, ok := reg.byHost[nh]; ok && existing.ID != s.ID {
@@ -99,7 +117,12 @@ func (r *Registry) Resolve(req *http.Request) *config.SiteConfig {
 	if r == nil {
 		return nil
 	}
-	host := r.requestHost(req)
+	hostWithPort, host := r.requestHosts(req)
+	if hostWithPort != "" {
+		if s, ok := r.byHostPort[hostWithPort]; ok {
+			return s
+		}
+	}
 	if host != "" {
 		if s, ok := r.byHost[host]; ok {
 			return s
@@ -111,9 +134,9 @@ func (r *Registry) Resolve(req *http.Request) *config.SiteConfig {
 	return nil
 }
 
-// requestHost returns the effective host for a request, honoring X-Forwarded-Host
-// only when the source is a trusted proxy.
-func (r *Registry) requestHost(req *http.Request) string {
+// requestHosts returns the effective host with and without port for a request,
+// honoring X-Forwarded-Host only when the source is a trusted proxy.
+func (r *Registry) requestHosts(req *http.Request) (string, string) {
 	host := req.Host
 	clientIP := localip.ExtractIP(req.RemoteAddr)
 	if clientIP != nil && localip.IsTrustedProxy(clientIP, r.trusted) {
@@ -123,7 +146,7 @@ func (r *Registry) requestHost(req *http.Request) string {
 			host = strings.TrimSpace(parts[0])
 		}
 	}
-	return normalizeHost(host)
+	return normalizeHostPort(host), normalizeHost(host)
 }
 
 // AllHostnames returns all hostnames for SAN aggregation.
@@ -190,6 +213,34 @@ func normalizeHost(host string) string {
 		host = h
 	}
 	return host
+}
+
+func normalizeHostPort(host string) string {
+	host = strings.TrimSpace(strings.ToLower(host))
+	if host == "" {
+		return ""
+	}
+	if strings.Contains(host, "://") {
+		if u, err := url.Parse(host); err == nil {
+			host = u.Host
+		}
+	}
+	return host
+}
+
+func listenPort(listen string) string {
+	listen = strings.TrimSpace(listen)
+	if listen == "" {
+		return ""
+	}
+	_, port, err := net.SplitHostPort(listen)
+	if err == nil {
+		return port
+	}
+	if strings.HasPrefix(listen, ":") && len(listen) > 1 {
+		return strings.TrimPrefix(listen, ":")
+	}
+	return ""
 }
 
 func appendIfMissing(list []string, value string) []string {

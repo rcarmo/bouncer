@@ -124,6 +124,37 @@ PICLAW_WEB_EXTERNAL_URL=https://piclaw-instance.example.com
 
 ---
 
+## LAN Port Aliases and mDNS
+
+A site may set `listen` to bind an additional HTTP/HTTPS listener for that site. This is intended for no-DNS LAN fallbacks where multiple Piclaw backends are reached by IP plus port:
+
+```json
+{
+  "id": "smith-lan",
+  "publicOrigin": "https://192.168.1.50:8441",
+  "rpID": "192.168.1.50",
+  "backend": "http://127.0.0.1:8081",
+  "hostnames": ["192.168.1.50"],
+  "ipAddresses": ["192.168.1.50"],
+  "listen": ":8441"
+}
+```
+
+When `server.mdns.enabled` is true, Bouncer publishes one DNS-SD service announcement per site:
+
+```json
+"mdns": {
+  "enabled": true,
+  "service": "_https._tcp",
+  "domain": "local.",
+  "instancePrefix": "Bouncer"
+}
+```
+
+Bouncer can announce multiple mDNS service instances, but this is not the same thing as browser DNS aliases. Bonjour-aware clients can discover the advertised services and ports; ordinary browsers still need a URL such as `https://192.168.1.50:8441` unless the OS provides a local hostname/alias.
+
+---
+
 ## Hot Reload
 
 Send `SIGHUP` to reload `bouncer.json` without dropping the listener:
@@ -138,11 +169,13 @@ Reloadable:
 - site `backend` URLs
 - `trustedProxies`
 - onboarding settings
+- mDNS service announcements
 - local TLS SAN/certificate material for newly-added hostnames
 
 Not reloadable without restart:
 
 - listen address (`server.listen`)
+- per-site `listen` port aliases (new listeners require restart)
 - Cloudflare/local-TLS mode (`server.cloudflare`)
 
 Existing proxied SSE/WebSocket connections keep using their already-selected backend. New requests use the reloaded routing/auth state.

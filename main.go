@@ -20,6 +20,7 @@ import (
 	"github.com/rcarmo/bouncer/internal/ca"
 	"github.com/rcarmo/bouncer/internal/config"
 	"github.com/rcarmo/bouncer/internal/localip"
+	"github.com/rcarmo/bouncer/internal/mdns"
 	"github.com/rcarmo/bouncer/internal/notify"
 	"github.com/rcarmo/bouncer/internal/proxy"
 	"github.com/rcarmo/bouncer/internal/session"
@@ -211,6 +212,13 @@ func main() {
 		proxyBySite[s.ID] = rp
 	}
 
+	mdnsAnnouncer, err := mdns.Start(cfg, siteRegistry.Sites)
+	if err != nil {
+		slog.Warn("mDNS announcements disabled", "error", err)
+		mdnsAnnouncer = &mdns.Announcer{}
+	}
+	defer mdnsAnnouncer.Close()
+
 	// Route/auth state is hot-swappable on SIGHUP. Handlers copy the current
 	// pointers under the lock and then release it before proxying long-lived
 	// responses such as SSE or WebSocket upgrades.
@@ -240,6 +248,17 @@ func main() {
 		stateMu.RLock()
 		defer stateMu.RUnlock()
 		return trustedNets
+	}
+	currentSiteListens := func() []string {
+		stateMu.RLock()
+		defer stateMu.RUnlock()
+		listens := make([]string, 0)
+		for _, s := range siteRegistry.Sites {
+			if strings.TrimSpace(s.Listen) != "" {
+				listens = append(listens, s.Listen)
+			}
+		}
+		return listens
 	}
 	defer func() { currentAuthn().Close() }()
 
@@ -457,6 +476,12 @@ func main() {
 			nextProxyBySite[s.ID] = rp
 		}
 
+		nextMDNS, err := mdns.Start(nextCfg, nextSites.Sites)
+		if err != nil {
+			slog.Warn("mDNS announcements disabled after reload", "error", err)
+			nextMDNS = &mdns.Announcer{}
+		}
+
 		var nextTLSCert tls.Certificate
 		if !nextCfg.Server.Cloudflare {
 			certPEM, keyPEM, err := ca.ServerTLSKeyPair(nextCfg)
@@ -471,6 +496,7 @@ func main() {
 
 		stateMu.Lock()
 		oldAuthn := authnHandler
+		oldMDNS := mdnsAnnouncer
 		cfg = nextCfg
 		trustedNets = nextTrusted
 		siteRegistry = nextSites
@@ -479,8 +505,10 @@ func main() {
 		if !nextCfg.Server.Cloudflare {
 			currentTLSCert = nextTLSCert
 		}
+		mdnsAnnouncer = nextMDNS
 		stateMu.Unlock()
 		oldAuthn.Close()
+		oldMDNS.Close()
 		slog.Info("configuration reloaded", "sites", len(nextSites.Sites), "hostnames", nextSites.AllHostnames())
 		return nil
 	}
@@ -495,14 +523,7 @@ func main() {
 		}
 	}()
 
-	// Start server.
-	addr := cfg.Server.Listen
-	if cfg.Server.Cloudflare {
-		// Cloudflare mode: plain HTTP.
-		if addr == ":443" {
-			addr = ":8080"
-		}
-		slog.Info("starting HTTP server (Cloudflare mode)", "addr", addr)
+	startHTTPServer := func(ctx context.Context, addr string, handler http.Handler) *http.Server {
 		srv := &http.Server{
 			Addr:              addr,
 			Handler:           handler,
@@ -514,15 +535,68 @@ func main() {
 		}
 		go func() {
 			if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Error("server error", "error", err)
+				slog.Error("server error", "addr", addr, "error", err)
 				os.Exit(1)
 			}
 		}()
+		go func() {
+			<-ctx.Done()
+			if err := srv.Shutdown(context.Background()); err != nil {
+				slog.Warn("http shutdown", "addr", addr, "error", err)
+			}
+		}()
+		return srv
+	}
+
+	startHTTPSServer := func(ctx context.Context, addr string, handler http.Handler, tlsConfig *tls.Config) *http.Server {
+		server := &http.Server{
+			Addr:              addr,
+			Handler:           handler,
+			ReadHeaderTimeout: readHeaderTimeout,
+			ReadTimeout:       readTimeout,
+			WriteTimeout:      writeTimeout,
+			IdleTimeout:       idleTimeout,
+			MaxHeaderBytes:    maxHeaderBytes,
+			TLSConfig:         tlsConfig,
+		}
+		ln, err := tls.Listen("tcp", addr, tlsConfig)
+		if err != nil {
+			slog.Error("TLS listen error", "addr", addr, "error", err)
+			os.Exit(1)
+		}
+		go func() {
+			if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
+				slog.Error("server error", "addr", addr, "error", err)
+				os.Exit(1)
+			}
+		}()
+		go func() {
+			<-ctx.Done()
+			if err := server.Shutdown(context.Background()); err != nil {
+				slog.Warn("https shutdown", "addr", addr, "error", err)
+			}
+		}()
+		return server
+	}
+
+	// Start server.
+	addr := cfg.Server.Listen
+	if cfg.Server.Cloudflare {
+		// Cloudflare mode: plain HTTP.
+		if addr == ":443" {
+			addr = ":8080"
+		}
+		slog.Info("starting HTTP server (Cloudflare mode)", "addr", addr)
+		startHTTPServer(ctx, addr, handler)
+		for _, aliasAddr := range uniqueStrings(currentSiteListens()) {
+			if aliasAddr == addr {
+				continue
+			}
+			slog.Info("starting HTTP port alias", "addr", aliasAddr)
+			startHTTPServer(ctx, aliasAddr, handler)
+		}
 		<-ctx.Done()
 		slog.Info("shutting down...")
-		if err := srv.Shutdown(context.Background()); err != nil {
-			slog.Warn("http shutdown", "error", err)
-		}
 	} else {
 		// Local TLS mode.
 		certPEM, keyPEM, err := ca.ServerTLSKeyPair(cfg)
@@ -537,26 +611,16 @@ func main() {
 		}
 		currentTLSCert = tlsCert
 
-		server := &http.Server{
-			Addr:              addr,
-			Handler:           handler,
-			ReadHeaderTimeout: readHeaderTimeout,
-			ReadTimeout:       readTimeout,
-			WriteTimeout:      writeTimeout,
-			IdleTimeout:       idleTimeout,
-			MaxHeaderBytes:    maxHeaderBytes,
-			TLSConfig: &tls.Config{
-				GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
-					stateMu.RLock()
-					defer stateMu.RUnlock()
-					return &currentTLSCert, nil
-				},
-				MinVersion: tls.VersionTLS12,
+		tlsConfig := &tls.Config{
+			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+				stateMu.RLock()
+				defer stateMu.RUnlock()
+				return &currentTLSCert, nil
 			},
+			MinVersion: tls.VersionTLS12,
 		}
 
 		// Also listen on HTTP for cert/profile downloads.
-		var httpSrv *http.Server
 		go func() {
 			httpAddr := ":80"
 			if addr != ":443" {
@@ -612,43 +676,21 @@ func main() {
 				target := siteCfg.PublicOrigin + r.URL.RequestURI()
 				http.Redirect(w, r, target, http.StatusMovedPermanently)
 			})
-			httpSrv = &http.Server{
-				Addr:              httpAddr,
-				Handler:           withSecurityHeaders(httpMux, currentTrusted),
-				ReadHeaderTimeout: readHeaderTimeout,
-				ReadTimeout:       readTimeout,
-				WriteTimeout:      writeTimeout,
-				IdleTimeout:       idleTimeout,
-				MaxHeaderBytes:    maxHeaderBytes,
-			}
+			startHTTPServer(ctx, httpAddr, withSecurityHeaders(httpMux, currentTrusted))
 			slog.Info("starting HTTP server (cert downloads)", "addr", httpAddr)
-			if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				slog.Warn("HTTP server error", "error", err)
-			}
 		}()
 
 		slog.Info("starting HTTPS server", "addr", addr, "origin", cfg.Server.PublicOrigin)
-		ln, err := tls.Listen("tcp", addr, server.TLSConfig)
-		if err != nil {
-			slog.Error("TLS listen error", "error", err)
-			os.Exit(1)
-		}
-		go func() {
-			if err := server.Serve(ln); err != nil && err != http.ErrServerClosed {
-				slog.Error("server error", "error", err)
-				os.Exit(1)
+		startHTTPSServer(ctx, addr, handler, tlsConfig)
+		for _, aliasAddr := range uniqueStrings(currentSiteListens()) {
+			if aliasAddr == addr {
+				continue
 			}
-		}()
+			slog.Info("starting HTTPS port alias", "addr", aliasAddr)
+			startHTTPSServer(ctx, aliasAddr, handler, tlsConfig)
+		}
 		<-ctx.Done()
 		slog.Info("shutting down...")
-		if err := server.Shutdown(context.Background()); err != nil {
-			slog.Warn("https shutdown", "error", err)
-		}
-		if httpSrv != nil {
-			if err := httpSrv.Shutdown(context.Background()); err != nil {
-				slog.Warn("http shutdown", "error", err)
-			}
-		}
 	}
 }
 
