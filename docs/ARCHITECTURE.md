@@ -17,10 +17,11 @@ bouncer/
 │   ├── ca/                 # Built-in CA, server cert, mobileconfig generation
 │   ├── config/             # Config types, JSON persistence, user CRUD
 │   ├── localip/            # RFC1918/loopback detection, trusted proxy logic
+│   ├── mdns/               # Optional Bonjour/mDNS service announcements
 │   ├── notify/             # GeoIP providers + Pushover alerts
 │   ├── proxy/              # Reverse proxy with X-Forwarded-* headers
 │   ├── session/            # File-backed session store with TTL + cleanup
-│   ├── site/               # Host-based site registry (multi-site routing)
+│   ├── site/               # Host + host:port site registry (multi-site routing)
 │   └── token/              # 6-digit enrollment token generation
 └── web/
     ├── embed.go            # embed.FS for static files
@@ -49,6 +50,9 @@ main.go
 │   └── go-webauthn/webauthn (external)
 ├── proxy           (reverse proxy)
 │   └── localip
+├── mdns            (DNS-SD/mDNS service publishing)
+│   ├── config
+│   └── zeroconf (external)
 ├── notify          (GeoIP providers + Pushover)
 │   └── config
 ├── token           (enrollment token)
@@ -135,12 +139,24 @@ sequenceDiagram
 
 ```
 Browser → HTTPS → Bouncer
-  0. Resolve site by Host / X-Forwarded-Host (trusted proxies only)
+  0. Resolve site by Host / host:port / X-Forwarded-Host (trusted proxies only)
   1. Check session cookie (must match resolved site)
   2. Valid? → forward to site backend via reverse proxy
   3. Invalid/missing? → redirect to /login
 ```
 
+### LAN port aliases
+
+For no-DNS LAN deployments, a site may define a `listen` port. The registry
+then maps the same host/IP plus different ports to different sites:
+
+```
+https://192.168.1.50:8441 → site smith → http://127.0.0.1:8081
+https://192.168.1.50:8442 → site jones → http://127.0.0.1:8082
+```
+
+This avoids path-prefix rewriting and keeps Piclaw's root-relative API, SSE,
+static asset, terminal, and VNC URLs intact.
 ### Onboarding Mode (new user)
 
 ```
@@ -175,6 +191,20 @@ Two files:
 | `sessions.json` | Active sessions (ID, user, timestamps) | On login, logout, periodic cleanup |
 
 Both use atomic writes (temp file → fsync → rename) to prevent corruption.
+
+## mDNS / Bonjour Architecture
+
+When `server.mdns.enabled` is true, Bouncer publishes one DNS-SD service
+announcement per site using the configured service type (default `_https._tcp`)
+and domain (`local.`). The TXT record includes the site id, public origin, and
+backend URL for discovery tools.
+
+Important limitation: this is service discovery, not wildcard DNS. Bouncer can
+announce multiple service instances, but ordinary browsers will not necessarily
+resolve multiple arbitrary aliases such as `smith.local` and `jones.local` unless
+the operating system/network stack provides hostname alias support. For reliable
+browser access without LAN DNS, use the advertised URLs or explicit IP+port
+bookmarks.
 
 ## TLS Architecture
 
@@ -216,6 +246,7 @@ Bouncer
 | Dependency | Purpose |
 |---|---|
 | `github.com/go-webauthn/webauthn` | WebAuthn server-side logic |
+| `github.com/grandcat/zeroconf` | DNS-SD/mDNS service announcements |
 | `github.com/fxamacker/cbor/v2` | CBOR decoding (transitive via webauthn) |
 
-All other functionality uses Go stdlib (`crypto/x509`, `crypto/ecdsa`, `net/http`, `encoding/json`, etc.).
+Core proxy/TLS/config functionality otherwise uses Go stdlib (`crypto/x509`, `crypto/ecdsa`, `net/http`, `encoding/json`, etc.).
