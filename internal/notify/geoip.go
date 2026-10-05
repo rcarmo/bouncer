@@ -257,7 +257,8 @@ func stringField(payload map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if v, ok := payload[key].(string); ok {
 			if len(v) > maxGeoFieldBytes {
-				return v[:maxGeoFieldBytes]
+				// Copy so a short cached field cannot retain a large JSON string allocation.
+				return strings.Clone(v[:maxGeoFieldBytes])
 			}
 			return v
 		}
