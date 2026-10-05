@@ -82,7 +82,7 @@ flowchart LR
 
 **Interaction flow**
 1. User visits `https://public.example.com/onboarding`.
-2. Bouncer issues a **one-time token** on the first registration attempt (logged + Pushover).
+2. Bouncer issues a **one-time token** on demand (optional Pushover delivery). A trusted operator can explicitly reset and print a code while the service is stopped.
 3. User enters the token, completes WebAuthn registration, and receives a session cookie.
 4. Authenticated requests are forwarded to the backend.
 
