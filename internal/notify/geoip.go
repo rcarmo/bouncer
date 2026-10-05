@@ -47,6 +47,9 @@ type FallbackGeoProvider struct {
 // External lookups retain at most 4096 entries, including across providers.
 const geoCacheCapacity = 4096
 
+// Cap retained field bytes as well as entry count (under 8 MiB of text at capacity).
+const maxGeoFieldBytes = 256
+
 type geoCacheEntry struct {
 	key     string
 	info    *GeoInfo
@@ -253,6 +256,9 @@ func NewGeoProvider(cfg config.GeoIPConfig, baseDir string) GeoProvider {
 func stringField(payload map[string]any, keys ...string) string {
 	for _, key := range keys {
 		if v, ok := payload[key].(string); ok {
+			if len(v) > maxGeoFieldBytes {
+				return v[:maxGeoFieldBytes]
+			}
 			return v
 		}
 	}

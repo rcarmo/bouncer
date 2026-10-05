@@ -6,6 +6,7 @@ import (
 	"container/list"
 	"context"
 	"encoding/csv"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -163,5 +164,16 @@ func TestGeoCacheExpiryAndCapacity(t *testing.T) {
 	}
 	if c.get("0", now.Add(2*time.Hour)) != nil || len(c.entries) != 0 || c.order.Len() != 0 {
 		t.Fatal("expiry did not empty cache")
+	}
+}
+
+func TestExternalGeoFieldRetentionBound(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"country": strings.Repeat("x", maxGeoFieldBytes+4096)})
+	}))
+	defer server.Close()
+	info, err := LookupGeoIP(context.Background(), config.GeoIPConfig{Enabled: true, URL: server.URL + "/%s", CacheTTLSeconds: 3600}, "1.2.3.4")
+	if err != nil || info == nil || len(info.Country) != maxGeoFieldBytes {
+		t.Fatalf("field not bounded: %v / %v", info, err)
 	}
 }
