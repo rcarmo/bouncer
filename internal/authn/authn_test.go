@@ -25,6 +25,7 @@ func setupTestHandler(t *testing.T) (*Handler, *config.Config, *session.Store) {
 	cfg.Server.RPID = "localhost"
 	cfg.Server.PublicOrigin = "https://localhost"
 	cfg.Onboarding.Enabled = true
+	cfg.Onboarding.GeoIP.Enabled = false
 	cfg.Onboarding.Token = "123456"
 	cfg.Onboarding.LocalBypass = true
 
@@ -52,7 +53,7 @@ func TestRegisterOptionsDisabledWhenNotOnboarding(t *testing.T) {
 	cfg.Onboarding.Enabled = false
 
 	body := `{"token":"123456","displayName":"Test","name":"test"}`
-	req := httptest.NewRequest("POST", "/webauthn/register/options", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "https://localhost/webauthn/register/options", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 	h.RegisterOptions(rr, req)
@@ -66,8 +67,9 @@ func TestRegisterOptionsInvalidToken(t *testing.T) {
 	h, _, _ := setupTestHandler(t)
 
 	body := `{"token":"000000","displayName":"Test","name":"test"}`
-	req := httptest.NewRequest("POST", "/webauthn/register/options", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "https://localhost/webauthn/register/options", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://localhost")
 	req.RemoteAddr = "8.8.8.8:1234" // Not local, so bypass doesn't apply.
 	rr := httptest.NewRecorder()
 	h.RegisterOptions(rr, req)
@@ -85,7 +87,7 @@ func TestRegisterOptionsRateLimit(t *testing.T) {
 
 	body := `{"token":"000000","displayName":"Test","name":"test"}`
 	for i := 0; i < 3; i++ {
-		req := httptest.NewRequest("POST", "/webauthn/register/options", strings.NewReader(body))
+		req := httptest.NewRequest("POST", "https://localhost/webauthn/register/options", strings.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
 		req.RemoteAddr = "8.8.8.8:1234"
 		rr := httptest.NewRecorder()
@@ -148,8 +150,9 @@ func TestRegisterOptionsLocalBypassDisabled(t *testing.T) {
 	cfg.Onboarding.LocalBypass = false
 
 	body := `{"token":"","displayName":"Test","name":"test"}`
-	req := httptest.NewRequest("POST", "/webauthn/register/options", strings.NewReader(body))
+	req := httptest.NewRequest("POST", "https://localhost/webauthn/register/options", strings.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Origin", "https://localhost")
 	req.RemoteAddr = "192.168.1.1:1234"
 	rr := httptest.NewRecorder()
 	h.RegisterOptions(rr, req)

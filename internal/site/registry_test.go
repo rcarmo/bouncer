@@ -8,7 +8,7 @@ import (
 	"github.com/rcarmo/bouncer/internal/config"
 )
 
-func TestRegistrySingleSiteFallback(t *testing.T) {
+func TestRegistrySingleSiteRejectsUnknownHost(t *testing.T) {
 	cfg := config.Defaults()
 	cfg.Server.PublicOrigin = "https://one.example.com"
 	cfg.Server.RPID = "one.example.com"
@@ -22,11 +22,8 @@ func TestRegistrySingleSiteFallback(t *testing.T) {
 	req := httptest.NewRequest("GET", "http://unknown.example.com/", nil)
 	req.Host = "unknown.example.com"
 	s := reg.Resolve(req)
-	if s == nil {
-		t.Fatal("expected default site")
-	}
-	if s.ID != "default" {
-		t.Fatalf("expected default site, got %s", s.ID)
+	if s != nil {
+		t.Fatalf("expected unknown host rejection, got %+v", s)
 	}
 }
 

@@ -30,6 +30,7 @@ type Store struct {
 	ttl      time.Duration
 	stopCh   chan struct{}
 	lastSave time.Time
+	stopOnce sync.Once
 }
 
 // sessionsFile is the JSON structure on disk.
@@ -73,8 +74,9 @@ func (s *Store) Create(siteID, userID string) (string, error) {
 	}
 	s.mu.Lock()
 	s.sessions[id] = sess
-	s.mu.Unlock()
-	if err := s.save(); err != nil {
+	defer s.mu.Unlock()
+	if err := s.saveLocked(); err != nil {
+		delete(s.sessions, id)
 		return "", err
 	}
 	return id, nil
@@ -99,24 +101,25 @@ func (s *Store) Get(id string) *Session {
 	if time.Since(s.lastSave) > time.Minute {
 		needSave = true
 	}
-	s.mu.Unlock()
+	copy := *sess
 	if needSave {
-		_ = s.save()
+		_ = s.saveLocked()
 	}
-	return sess
+	s.mu.Unlock()
+	return &copy
 }
 
 // Delete removes a session.
-func (s *Store) Delete(id string) {
+func (s *Store) Delete(id string) error {
 	s.mu.Lock()
 	delete(s.sessions, id)
-	s.mu.Unlock()
-	_ = s.save()
+	defer s.mu.Unlock()
+	return s.saveLocked()
 }
 
 // Stop stops the background cleanup goroutine.
 func (s *Store) Stop() {
-	close(s.stopCh)
+	s.stopOnce.Do(func() { close(s.stopCh) })
 }
 
 func (s *Store) load() error {
@@ -132,6 +135,9 @@ func (s *Store) load() error {
 		return fmt.Errorf("session: parse: %w", err)
 	}
 	for _, sess := range f.Sessions {
+		if sess == nil || sess.ID == "" {
+			continue
+		}
 		if sess.SiteID == "" {
 			sess.SiteID = "default"
 		}
@@ -141,12 +147,16 @@ func (s *Store) load() error {
 }
 
 func (s *Store) save() error {
-	s.mu.RLock()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.saveLocked()
+}
+
+func (s *Store) saveLocked() error {
 	list := make([]*Session, 0, len(s.sessions))
 	for _, sess := range s.sessions {
 		list = append(list, sess)
 	}
-	s.mu.RUnlock()
 	data, err := json.MarshalIndent(sessionsFile{Sessions: list}, "", "  ")
 	if err != nil {
 		return fmt.Errorf("session: marshal: %w", err)
@@ -154,9 +164,7 @@ func (s *Store) save() error {
 	if err := atomicfile.Write(s.path, data, 0600); err != nil {
 		return err
 	}
-	s.mu.Lock()
 	s.lastSave = time.Now()
-	s.mu.Unlock()
 	return nil
 }
 

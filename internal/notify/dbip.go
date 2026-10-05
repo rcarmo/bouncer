@@ -35,6 +35,13 @@ type DBIPProvider struct {
 	lastSourceURL string
 	lastChecked   time.Time
 	updateMu      sync.Mutex
+	initOnce      sync.Once
+	ctx           context.Context
+	cancel        context.CancelFunc
+	workers       sync.WaitGroup
+	closeOnce     sync.Once
+	closeErr      error
+	closed        bool // protected by dbMu
 }
 
 func NewDBIPProvider(cfg config.DBIPConfig, baseDir string) GeoProvider {
@@ -54,9 +61,11 @@ func NewDBIPProvider(cfg config.DBIPConfig, baseDir string) GeoProvider {
 		slog.Warn("dbip open failed", "error", err)
 	}
 
+	provider.initLifecycle()
 	if cfg.AutoUpdate {
-		go provider.updateOnce()
-		go provider.autoUpdateLoop()
+		provider.workers.Add(2)
+		go func() { defer provider.workers.Done(); provider.updateOnce() }()
+		go func() { defer provider.workers.Done(); provider.autoUpdateLoop() }()
 	}
 
 	return provider
@@ -74,9 +83,14 @@ func (p *DBIPProvider) Lookup(ctx context.Context, ip string, _ http.Header) (*G
 	if err := p.ensureDB(ctx, false); err != nil {
 		return nil, err
 	}
-	db := p.getDB()
+	p.dbMu.RLock()
+	defer p.dbMu.RUnlock()
+	if p.closed {
+		return nil, fmt.Errorf("dbip: provider closed")
+	}
+	db := p.db
 	if db == nil {
-		return nil, nil
+		return nil, fmt.Errorf("dbip: database missing")
 	}
 
 	row := db.QueryRowContext(ctx, `
@@ -121,28 +135,38 @@ func (p *DBIPProvider) ensureDB(ctx context.Context, force bool) error {
 	if !p.cfg.Enabled {
 		return nil
 	}
+	p.initLifecycle()
+	ctx, cancel := context.WithCancel(ctx)
+	stop := context.AfterFunc(p.ctx, cancel)
+	defer func() { stop(); cancel() }()
 	p.updateMu.Lock()
 	defer p.updateMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p.ctx.Err() != nil {
+		return fmt.Errorf("dbip: provider closed")
+	}
 
-	if p.db == nil {
+	if p.getDB() == nil {
 		if err := p.openExistingDB(); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 
-	if !force && !p.shouldCheck() {
-		return nil
-	}
-
-	if p.db != nil && !p.updateDue() {
-		return nil
-	}
-
-	if !p.cfg.AutoUpdate && p.db != nil && !force {
-		return nil
-	}
-	if !p.cfg.AutoUpdate && p.db == nil && !force {
+	if p.getDB() == nil && !p.cfg.AutoUpdate && !force {
 		return fmt.Errorf("dbip: database missing and autoUpdate disabled")
+	}
+	if !force && p.getDB() != nil && !p.shouldCheck() {
+		return nil
+	}
+
+	if p.getDB() != nil && !p.updateDue() {
+		return nil
+	}
+
+	if !p.cfg.AutoUpdate && p.getDB() != nil && !force {
+		return nil
 	}
 
 	updateURL, err := p.resolveUpdateURL(ctx)
@@ -152,7 +176,7 @@ func (p *DBIPProvider) ensureDB(ctx context.Context, force bool) error {
 	if updateURL == "" {
 		return fmt.Errorf("dbip: update URL not resolved")
 	}
-	if p.lastSourceURL == updateURL && !p.updateDue() {
+	if p.getDB() != nil && p.lastSourceURL == updateURL && !p.updateDue() {
 		return nil
 	}
 
@@ -163,7 +187,7 @@ func (p *DBIPProvider) ensureDB(ctx context.Context, force bool) error {
 }
 
 func (p *DBIPProvider) updateOnce() {
-	ctx, cancel := context.WithTimeout(context.Background(), p.downloadTimeout())
+	ctx, cancel := context.WithTimeout(p.lifecycleContext(), p.downloadTimeout())
 	defer cancel()
 	if err := p.ensureDB(ctx, true); err != nil {
 		slog.Warn("dbip update failed", "error", err)
@@ -174,8 +198,13 @@ func (p *DBIPProvider) autoUpdateLoop() {
 	interval := p.updateInterval()
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
-	for range ticker.C {
-		ctx, cancel := context.WithTimeout(context.Background(), p.downloadTimeout())
+	for {
+		select {
+		case <-p.lifecycleContext().Done():
+			return
+		case <-ticker.C:
+		}
+		ctx, cancel := context.WithTimeout(p.lifecycleContext(), p.downloadTimeout())
 		if err := p.ensureDB(ctx, false); err != nil {
 			slog.Warn("dbip auto update failed", "error", err)
 		}
@@ -221,6 +250,15 @@ func (p *DBIPProvider) getDB() *sql.DB {
 }
 
 func (p *DBIPProvider) openExistingDB() error {
+	p.dbMu.Lock()
+	defer p.dbMu.Unlock()
+	return p.openExistingDBLocked()
+}
+
+func (p *DBIPProvider) openExistingDBLocked() error {
+	if p.closed {
+		return fmt.Errorf("dbip: provider closed")
+	}
 	if p.db != nil {
 		return nil
 	}
@@ -235,11 +273,9 @@ func (p *DBIPProvider) openExistingDB() error {
 	db.SetMaxIdleConns(1)
 
 	url, updatedAt := readDBIPMeta(db)
-	p.dbMu.Lock()
 	p.db = db
 	p.lastSourceURL = url
 	p.lastUpdate = updatedAt
-	p.dbMu.Unlock()
 	return nil
 }
 
@@ -260,7 +296,7 @@ func (p *DBIPProvider) resolveUpdateURL(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("dbip: update page status %d", resp.StatusCode)
 	}
@@ -289,7 +325,7 @@ func (p *DBIPProvider) downloadAndBuild(ctx context.Context, url string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return fmt.Errorf("dbip: download status %d", resp.StatusCode)
 	}
@@ -298,24 +334,32 @@ func (p *DBIPProvider) downloadAndBuild(ctx context.Context, url string) error {
 	if err != nil {
 		return err
 	}
-	defer gz.Close()
+	defer func() { _ = gz.Close() }()
 
-	if err := os.MkdirAll(filepath.Dir(p.dbPath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(p.dbPath), 0700); err != nil {
 		return err
 	}
 
 	tmpPath := fmt.Sprintf("%s.%d.tmp", p.dbPath, time.Now().UnixNano())
-	if err := p.buildDB(tmpPath, bufio.NewReader(gz), url); err != nil {
+	if err := p.buildDBContext(ctx, tmpPath, bufio.NewReader(gz), url); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
 
 	p.dbMu.Lock()
+	defer p.dbMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		_ = os.Remove(tmpPath)
+		return err
+	}
+	if p.closed {
+		_ = os.Remove(tmpPath)
+		return fmt.Errorf("dbip: provider closed")
+	}
 	if p.db != nil {
 		_ = p.db.Close()
 		p.db = nil
 	}
-	p.dbMu.Unlock()
 
 	if err := os.Rename(tmpPath, p.dbPath); err != nil {
 		_ = os.Remove(tmpPath)
@@ -323,26 +367,30 @@ func (p *DBIPProvider) downloadAndBuild(ctx context.Context, url string) error {
 	}
 	p.lastSourceURL = url
 	p.lastUpdate = time.Now().UTC()
-	return nil
+	return p.openExistingDBLocked()
 }
 
 func (p *DBIPProvider) buildDB(path string, reader io.Reader, sourceURL string) error {
+	return p.buildDBContext(context.Background(), path, reader, sourceURL)
+}
+
+func (p *DBIPProvider) buildDBContext(ctx context.Context, path string, reader io.Reader, sourceURL string) error {
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		return err
 	}
-	defer db.Close()
-	if _, err := db.Exec("PRAGMA journal_mode=OFF"); err != nil {
+	defer func() { _ = db.Close() }()
+	if _, err := db.ExecContext(ctx, "PRAGMA journal_mode=OFF"); err != nil {
 		return err
 	}
-	if _, err := db.Exec("PRAGMA synchronous=OFF"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA synchronous=OFF"); err != nil {
 		return err
 	}
-	if _, err := db.Exec("PRAGMA temp_store=MEMORY"); err != nil {
+	if _, err := db.ExecContext(ctx, "PRAGMA temp_store=MEMORY"); err != nil {
 		return err
 	}
 
-	if _, err := db.Exec(`
+	if _, err := db.ExecContext(ctx, `
 		CREATE TABLE geoip (
 			ip_from INTEGER NOT NULL,
 			ip_to INTEGER NOT NULL,
@@ -355,26 +403,30 @@ func (p *DBIPProvider) buildDB(path string, reader io.Reader, sourceURL string) 
 	`); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`); err != nil {
+	if _, err := db.ExecContext(ctx, `CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);`); err != nil {
 		return err
 	}
 
-	tx, err := db.Begin()
+	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	stmt, err := tx.Prepare(`INSERT INTO geoip (ip_from, ip_to, country_code, region, city, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?, ?)`)
+	stmt, err := tx.PrepareContext(ctx, `INSERT INTO geoip (ip_from, ip_to, country_code, region, city, latitude, longitude) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		_ = tx.Rollback()
 		return err
 	}
-	defer stmt.Close()
+	defer func() { _ = stmt.Close() }()
 
 	csvReader := csv.NewReader(reader)
 	csvReader.FieldsPerRecord = -1
 
 	var count int
 	for {
+		if err := ctx.Err(); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
 		record, err := csvReader.Read()
 		if errors.Is(err, io.EOF) {
 			break
@@ -400,7 +452,7 @@ func (p *DBIPProvider) buildDB(path string, reader io.Reader, sourceURL string) 
 		lat := parseFloat(record[6])
 		lon := parseFloat(record[7])
 
-		if _, err := stmt.Exec(int64(ipFrom), int64(ipTo), countryCode, region, city, lat, lon); err != nil {
+		if _, err := stmt.ExecContext(ctx, int64(ipFrom), int64(ipTo), countryCode, region, city, lat, lon); err != nil {
 			_ = tx.Rollback()
 			return err
 		}
@@ -410,15 +462,15 @@ func (p *DBIPProvider) buildDB(path string, reader io.Reader, sourceURL string) 
 		return err
 	}
 
-	if _, err := db.Exec(`CREATE INDEX idx_geoip_from ON geoip (ip_from);`); err != nil {
+	if _, err := db.ExecContext(ctx, `CREATE INDEX idx_geoip_from ON geoip (ip_from);`); err != nil {
 		return err
 	}
-	if _, err := db.Exec(`CREATE INDEX idx_geoip_to ON geoip (ip_to);`); err != nil {
+	if _, err := db.ExecContext(ctx, `CREATE INDEX idx_geoip_to ON geoip (ip_to);`); err != nil {
 		return err
 	}
 
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
-	if _, err := db.Exec(`INSERT INTO meta (key, value) VALUES (?, ?), (?, ?), (?, ?)`, "source_url", sourceURL, "updated_at", updatedAt, "record_count", strconv.Itoa(count)); err != nil {
+	if _, err := db.ExecContext(ctx, `INSERT INTO meta (key, value) VALUES (?, ?), (?, ?), (?, ?)`, "source_url", sourceURL, "updated_at", updatedAt, "record_count", strconv.Itoa(count)); err != nil {
 		return err
 	}
 
@@ -431,7 +483,7 @@ func readDBIPMeta(db *sql.DB) (string, time.Time) {
 	if err != nil {
 		return "", time.Time{}
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var url string
 	var updatedAt time.Time
@@ -488,16 +540,8 @@ func RunDBIPUpdate(ctx context.Context, cfg config.DBIPConfig, baseDir string) e
 		cfg:    cfg,
 		dbPath: path,
 	}
-	if err := provider.ensureDB(ctx, true); err != nil {
-		return err
-	}
-	provider.dbMu.Lock()
-	if provider.db != nil {
-		_ = provider.db.Close()
-		provider.db = nil
-	}
-	provider.dbMu.Unlock()
-	return nil
+	defer func() { _ = provider.Close() }()
+	return provider.ensureDB(ctx, true)
 }
 
 func resolveDBPath(path string, baseDir string) string {
@@ -512,4 +556,35 @@ func resolveDBPath(path string, baseDir string) string {
 		return path
 	}
 	return filepath.Join(baseDir, path)
+}
+
+// initLifecycle also supports providers constructed directly by callers/tests.
+func (p *DBIPProvider) initLifecycle() {
+	// #nosec G118 -- lifecycle cancellation is retained on the provider and invoked by Close.
+	p.initOnce.Do(func() { p.ctx, p.cancel = context.WithCancel(context.Background()) })
+}
+
+func (p *DBIPProvider) lifecycleContext() context.Context {
+	p.initLifecycle()
+	return p.ctx
+}
+
+// Close cancels downloads, joins workers, then retires the pool. Never wait
+// for workers while holding updateMu or dbMu: workers need both to exit.
+func (p *DBIPProvider) Close() error {
+	p.initLifecycle()
+	p.closeOnce.Do(func() {
+		p.cancel()
+		p.workers.Wait()
+		p.updateMu.Lock()
+		defer p.updateMu.Unlock()
+		p.dbMu.Lock()
+		defer p.dbMu.Unlock()
+		p.closed = true
+		if p.db != nil {
+			p.closeErr = p.db.Close()
+			p.db = nil
+		}
+	})
+	return p.closeErr
 }

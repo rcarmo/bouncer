@@ -108,7 +108,7 @@ func TestWritePermissions(t *testing.T) {
 	tests := []os.FileMode{0600, 0644, 0400}
 	for _, perm := range tests {
 		path := filepath.Join(dir, "perm_test")
-		os.Remove(path)
+		_ = os.Remove(path)
 		if err := Write(path, []byte("x"), perm); err != nil {
 			t.Fatalf("Write perm %o: %v", perm, err)
 		}

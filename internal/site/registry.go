@@ -6,20 +6,22 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/rcarmo/bouncer/internal/config"
 	"github.com/rcarmo/bouncer/internal/localip"
+	"golang.org/x/net/publicsuffix"
 )
 
 // Registry resolves incoming requests to a site configuration.
 type Registry struct {
-	Sites       []*config.SiteConfig
-	byHost      map[string]*config.SiteConfig
-	byHostPort  map[string]*config.SiteConfig
-	byID        map[string]*config.SiteConfig
-	defaultSite *config.SiteConfig
-	trusted     []*net.IPNet
+	Sites      []*config.SiteConfig
+	byHost     map[string]*config.SiteConfig
+	byHostPort map[string]*config.SiteConfig
+	byID       map[string]*config.SiteConfig
+	trusted    []*net.IPNet
 }
 
 // New builds a registry from config, supporting single- or multi-site mode.
@@ -38,6 +40,8 @@ func New(cfg *config.Config, trusted []*net.IPNet) (*Registry, error) {
 	} else {
 		for i := range cfg.Sites {
 			s := cfg.Sites[i]
+			s.Hostnames = append([]string(nil), s.Hostnames...)
+			s.IPAddresses = append([]string(nil), s.IPAddresses...)
 			sites = append(sites, &s)
 		}
 	}
@@ -54,7 +58,11 @@ func New(cfg *config.Config, trusted []*net.IPNet) (*Registry, error) {
 		if s.PublicOrigin == "" {
 			return nil, fmt.Errorf("site %q missing publicOrigin", s.ID)
 		}
-		hostFromOrigin := originHost(s.PublicOrigin)
+		origin, err := validateURL(s.PublicOrigin, true)
+		if err != nil {
+			return nil, fmt.Errorf("site %q invalid publicOrigin: %w", s.ID, err)
+		}
+		hostFromOrigin := normalizeHost(origin.Host)
 		if s.ID == "" {
 			if hostFromOrigin != "" {
 				s.ID = hostFromOrigin
@@ -77,14 +85,31 @@ func New(cfg *config.Config, trusted []*net.IPNet) (*Registry, error) {
 			s.Hostnames = appendIfMissing(s.Hostnames, hostFromOrigin)
 		}
 
+		if _, exists := reg.byID[s.ID]; exists {
+			return nil, fmt.Errorf("duplicate site id %q", s.ID)
+		}
+		if err := validateRPID(hostFromOrigin, s.RPID); err != nil {
+			return nil, fmt.Errorf("site %q invalid rpID: %w", s.ID, err)
+		}
+		if _, err := validateURL(s.Backend, false); err != nil {
+			return nil, fmt.Errorf("site %q invalid backend: %w", s.ID, err)
+		}
 		reg.byID[s.ID] = s
 		listenPort := listenPort(s.Listen)
+		originPort := origin.Port()
+		if originPort != "" {
+			hp := net.JoinHostPort(hostFromOrigin, originPort)
+			if existing := reg.byHostPort[hp]; existing != nil && existing != s {
+				return nil, fmt.Errorf("hostname/port %q assigned to multiple sites", hp)
+			}
+			reg.byHostPort[hp] = s
+		}
 		for _, h := range s.Hostnames {
 			nh := normalizeHost(h)
 			if nh == "" {
 				continue
 			}
-			if hp := normalizeHostPort(h); hp != "" && strings.Contains(hp, ":") {
+			if hp := normalizeHostPort(h); hasPort(hp) {
 				if existing, ok := reg.byHostPort[hp]; ok && existing.ID != s.ID {
 					return nil, fmt.Errorf("hostname/port %q assigned to multiple sites", hp)
 				}
@@ -92,11 +117,14 @@ func New(cfg *config.Config, trusted []*net.IPNet) (*Registry, error) {
 				continue
 			}
 			if listenPort != "" {
-				hp := nh + ":" + listenPort
+				hp := net.JoinHostPort(nh, listenPort)
 				if existing, ok := reg.byHostPort[hp]; ok && existing.ID != s.ID {
 					return nil, fmt.Errorf("hostname/port %q assigned to multiple sites", hp)
 				}
 				reg.byHostPort[hp] = s
+				continue
+			}
+			if originPort != "" && nh == hostFromOrigin {
 				continue
 			}
 			if existing, ok := reg.byHost[nh]; ok && existing.ID != s.ID {
@@ -106,9 +134,6 @@ func New(cfg *config.Config, trusted []*net.IPNet) (*Registry, error) {
 		}
 	}
 
-	if len(sites) > 0 {
-		reg.defaultSite = sites[0]
-	}
 	return reg, nil
 }
 
@@ -127,9 +152,6 @@ func (r *Registry) Resolve(req *http.Request) *config.SiteConfig {
 		if s, ok := r.byHost[host]; ok {
 			return s
 		}
-	}
-	if len(r.Sites) == 1 {
-		return r.defaultSite
 	}
 	return nil
 }
@@ -154,13 +176,14 @@ func (r *Registry) AllHostnames() []string {
 	set := make(map[string]struct{})
 	for _, s := range r.Sites {
 		for _, h := range s.Hostnames {
-			if h == "" {
+			h = normalizeHost(h)
+			if h == "" || net.ParseIP(h) != nil {
 				continue
 			}
 			set[h] = struct{}{}
 		}
 		hostFromOrigin := originHost(s.PublicOrigin)
-		if hostFromOrigin != "" {
+		if hostFromOrigin != "" && net.ParseIP(hostFromOrigin) == nil {
 			set[hostFromOrigin] = struct{}{}
 		}
 	}
@@ -168,6 +191,7 @@ func (r *Registry) AllHostnames() []string {
 	for h := range set {
 		out = append(out, h)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -175,17 +199,20 @@ func (r *Registry) AllHostnames() []string {
 func (r *Registry) AllIPs() []string {
 	set := make(map[string]struct{})
 	for _, s := range r.Sites {
-		for _, ip := range s.IPAddresses {
-			if ip == "" {
-				continue
+		values := append([]string(nil), s.IPAddresses...)
+		values = append(values, s.Hostnames...)
+		values = append(values, originHost(s.PublicOrigin))
+		for _, value := range values {
+			if ip := net.ParseIP(normalizeHost(value)); ip != nil {
+				set[ip.String()] = struct{}{}
 			}
-			set[ip] = struct{}{}
 		}
 	}
 	out := make([]string, 0, len(set))
 	for ip := range set {
 		out = append(out, ip)
 	}
+	sort.Strings(out)
 	return out
 }
 
@@ -212,6 +239,13 @@ func normalizeHost(host string) string {
 	if h, _, err := net.SplitHostPort(host); err == nil {
 		host = h
 	}
+	host = strings.Trim(host, "[]")
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	if strings.ContainsAny(host, " \t\r\n/") || strings.Contains(host, "://") {
+		return ""
+	}
 	return host
 }
 
@@ -225,7 +259,10 @@ func normalizeHostPort(host string) string {
 			host = u.Host
 		}
 	}
-	return host
+	if h, p, err := net.SplitHostPort(host); err == nil {
+		return net.JoinHostPort(normalizeHost(h), p)
+	}
+	return normalizeHost(host)
 }
 
 func listenPort(listen string) string {
@@ -250,4 +287,69 @@ func appendIfMissing(list []string, value string) []string {
 		}
 	}
 	return append(list, value)
+}
+
+func hasPort(host string) bool { _, _, err := net.SplitHostPort(host); return err == nil }
+
+func validateURL(raw string, origin bool) (*url.URL, error) {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return nil, err
+	}
+	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" || u.User != nil || u.Opaque != "" || strings.ContainsAny(u.Hostname(), " \t\r\n") {
+		return nil, fmt.Errorf("expected absolute HTTP(S) URL without userinfo")
+	}
+	if strings.Contains(u.Hostname(), ":") && net.ParseIP(u.Hostname()) == nil {
+		return nil, fmt.Errorf("invalid IP host")
+	}
+	if p := u.Port(); p != "" {
+		n, err := strconv.Atoi(p)
+		if err != nil || n < 1 || n > 65535 {
+			return nil, fmt.Errorf("invalid port")
+		}
+	} else if strings.HasSuffix(u.Host, ":") {
+		return nil, fmt.Errorf("empty port")
+	}
+	if u.Fragment != "" || strings.Contains(raw, "#") || (origin && (u.Path != "" || u.RawQuery != "" || u.ForceQuery)) {
+		return nil, fmt.Errorf("unexpected path, query or fragment")
+	}
+	return u, nil
+}
+
+func validateRPID(host, rpID string) error {
+	rpID = strings.ToLower(rpID)
+	if rpID == "" || strings.ContainsAny(rpID, "/?#@ ") {
+		return fmt.Errorf("invalid domain")
+	}
+	if net.ParseIP(host) != nil {
+		if net.ParseIP(rpID) == nil || !net.ParseIP(host).Equal(net.ParseIP(rpID)) {
+			return fmt.Errorf("IP origin requires matching RP ID")
+		}
+		return nil
+	}
+	if host != rpID && !strings.HasSuffix(host, "."+rpID) {
+		return fmt.Errorf("RP ID is not an origin domain suffix")
+	}
+	suffix, icann := publicsuffix.PublicSuffix(rpID)
+	if suffix == rpID && (icann || strings.Contains(rpID, ".")) {
+		return fmt.Errorf("RP ID is a public suffix")
+	}
+	return nil
+}
+
+// ResolveBootstrap selects the canonical HTTPS site from the separate HTTP
+// trust listener. Shared-host port aliases are ambiguous here and fail closed.
+func (r *Registry) ResolveBootstrap(req *http.Request) *config.SiteConfig {
+	_, host := r.requestHosts(req)
+	var found *config.SiteConfig
+	for _, s := range r.Sites {
+		if originHost(s.PublicOrigin) != host {
+			continue
+		}
+		if found != nil {
+			return nil
+		}
+		found = s
+	}
+	return found
 }

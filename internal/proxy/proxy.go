@@ -2,11 +2,13 @@
 package proxy
 
 import (
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/rcarmo/bouncer/internal/localip"
@@ -18,6 +20,9 @@ func New(backendURL string, trusted []*net.IPNet) (*httputil.ReverseProxy, error
 	target, err := url.Parse(backendURL)
 	if err != nil {
 		return nil, err
+	}
+	if (target.Scheme != "http" && target.Scheme != "https") || target.Hostname() == "" || target.Fragment != "" {
+		return nil, fmt.Errorf("proxy: backend must be an absolute HTTP(S) URL")
 	}
 
 	transport := http.DefaultTransport.(*http.Transport).Clone()
@@ -33,10 +38,24 @@ func New(backendURL string, trusted []*net.IPNet) (*httputil.ReverseProxy, error
 			r.SetURL(target)
 
 			clientIP := localip.ExtractIP(r.In.RemoteAddr)
-
+			// These non-standard attribution headers may have been supplied by a
+			// client even when the immediate peer is a trusted generic proxy.
+			for _, header := range []string{"CF-Connecting-IP", "True-Client-IP", "X-Real-IP"} {
+				r.Out.Header.Del(header)
+			}
 			if clientIP != nil && localip.IsTrustedProxy(clientIP, trusted) {
-				// Trusted proxy: preserve existing forwarded headers and append.
+				// Rewrite removes forwarded headers before calling us. SetXForwarded
+				// alone would discard the original client, public host and HTTPS scheme.
 				r.SetXForwarded()
+				if original := localip.ClientIPFromRequest(r.In, trusted); original != nil {
+					r.Out.Header.Set("X-Forwarded-For", original.String()+", "+clientIP.String())
+				}
+				if host := r.In.Header.Get("X-Forwarded-Host"); host != "" && !strings.Contains(host, ",") {
+					r.Out.Header.Set("X-Forwarded-Host", host)
+				}
+				if proto := strings.ToLower(r.In.Header.Get("X-Forwarded-Proto")); proto == "https" || proto == "http" {
+					r.Out.Header.Set("X-Forwarded-Proto", proto)
+				}
 				return
 			}
 

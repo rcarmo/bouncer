@@ -3,7 +3,9 @@ package notify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -37,6 +39,8 @@ type ExternalGeoProvider struct {
 
 type FallbackGeoProvider struct {
 	providers []GeoProvider
+	closeOnce sync.Once
+	closeErr  error
 }
 
 type geoCacheEntry struct {
@@ -82,7 +86,7 @@ func LookupGeoIP(ctx context.Context, cfg config.GeoIPConfig, ip string) (*GeoIn
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("geoip: status %d", resp.StatusCode)
 	}
@@ -164,7 +168,7 @@ func (p ExternalGeoProvider) Lookup(ctx context.Context, ip string, _ http.Heade
 	return LookupGeoIP(ctx, p.cfg, ip)
 }
 
-func (p FallbackGeoProvider) Lookup(ctx context.Context, ip string, headers http.Header) (*GeoInfo, error) {
+func (p *FallbackGeoProvider) Lookup(ctx context.Context, ip string, headers http.Header) (*GeoInfo, error) {
 	var lastErr error
 	for _, provider := range p.providers {
 		if provider == nil {
@@ -202,7 +206,7 @@ func NewGeoProvider(cfg config.GeoIPConfig, baseDir string) GeoProvider {
 	if len(providers) == 1 {
 		return providers[0]
 	}
-	return FallbackGeoProvider{providers: providers}
+	return &FallbackGeoProvider{providers: providers}
 }
 
 func stringField(payload map[string]any, keys ...string) string {
@@ -221,4 +225,16 @@ func floatField(payload map[string]any, keys ...string) float64 {
 		}
 	}
 	return 0
+}
+
+// Close propagates lifecycle cleanup only to providers that own resources.
+func (p *FallbackGeoProvider) Close() error {
+	p.closeOnce.Do(func() {
+		for _, provider := range p.providers {
+			if closer, ok := provider.(io.Closer); ok {
+				p.closeErr = errors.Join(p.closeErr, closer.Close())
+			}
+		}
+	})
+	return p.closeErr
 }

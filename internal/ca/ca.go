@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
@@ -18,8 +19,9 @@ import (
 
 // EnsureCA generates a root CA if one doesn't exist in the config, and saves it.
 func EnsureCA(cfg *config.Config) error {
-	if cfg.Server.TLS.CA != nil && cfg.Server.TLS.CA.CertPem != "" {
-		return nil // CA already exists.
+	if kp := cfg.Server.TLS.CA; kp != nil && (kp.CertPem != "" || kp.KeyPem != "") {
+		_, _, err := validatedCA(kp)
+		return err
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -75,15 +77,17 @@ func EnsureServerCert(cfg *config.Config) error {
 	}
 
 	// Parse CA cert + key.
-	caCert, caKey, err := parseKeyPair(cfg.Server.TLS.CA)
+	caCert, caKey, err := validatedCA(cfg.Server.TLS.CA)
 	if err != nil {
 		return fmt.Errorf("ca: parse CA: %w", err)
 	}
 
 	// Check if existing server cert matches current SANs.
 	if cfg.Server.TLS.ServerCert != nil && cfg.Server.TLS.ServerCert.CertPem != "" {
-		if !sansChanged(cfg) {
-			return nil // SANs haven't changed, keep existing cert.
+		cert, _, err := parseKeyPair(cfg.Server.TLS.ServerCert)
+		now := time.Now()
+		if err == nil && !now.Before(cert.NotBefore) && cert.NotAfter.After(now.Add(30*24*time.Hour)) && cert.CheckSignatureFrom(caCert) == nil && !sansChanged(cfg) {
+			return nil // Existing certificate is still usable.
 		}
 	}
 
@@ -123,6 +127,9 @@ func EnsureServerCert(cfg *config.Config) error {
 		BasicConstraintsValid: true,
 	}
 
+	if tmpl.NotAfter.After(caCert.NotAfter) {
+		tmpl.NotAfter = caCert.NotAfter
+	}
 	certDER, err := x509.CreateCertificate(rand.Reader, tmpl, caCert, &serverKey.PublicKey, caKey)
 	if err != nil {
 		return fmt.Errorf("ca: create server cert: %w", err)
@@ -165,6 +172,12 @@ func ServerTLSKeyPair(cfg *config.Config) (certPEM, keyPEM []byte, err error) {
 }
 
 func parseKeyPair(kp *config.KeyPair) (*x509.Certificate, *ecdsa.PrivateKey, error) {
+	if kp == nil {
+		return nil, nil, fmt.Errorf("missing key pair")
+	}
+	if _, err := tls.X509KeyPair([]byte(kp.CertPem), []byte(kp.KeyPem)); err != nil {
+		return nil, nil, err
+	}
 	certBlock, _ := pem.Decode([]byte(kp.CertPem))
 	if certBlock == nil {
 		return nil, nil, fmt.Errorf("invalid cert PEM")
@@ -180,7 +193,15 @@ func parseKeyPair(kp *config.KeyPair) (*x509.Certificate, *ecdsa.PrivateKey, err
 	}
 	key, err := x509.ParseECPrivateKey(keyBlock.Bytes)
 	if err != nil {
-		return nil, nil, err
+		parsed, parseErr := x509.ParsePKCS8PrivateKey(keyBlock.Bytes)
+		if parseErr != nil {
+			return nil, nil, err
+		}
+		var ok bool
+		key, ok = parsed.(*ecdsa.PrivateKey)
+		if !ok {
+			return nil, nil, fmt.Errorf("expected ECDSA private key")
+		}
 	}
 	return cert, key, nil
 }
@@ -219,7 +240,9 @@ func sansChanged(cfg *config.Config) bool {
 	// Check IPs.
 	wantedIPs := make(map[string]bool)
 	for _, ip := range cfg.Server.IPAddresses {
-		wantedIPs[ip] = true
+		if parsed := net.ParseIP(ip); parsed != nil {
+			wantedIPs[parsed.String()] = true
+		}
 	}
 	existingIPs := make(map[string]bool)
 	for _, ip := range cert.IPAddresses {
@@ -249,4 +272,23 @@ func firstOrDefault(ss []string, def string) string {
 		return ss[0]
 	}
 	return def
+}
+
+// Existing trust roots are validated, never silently replaced.
+func validatedCA(kp *config.KeyPair) (*x509.Certificate, *ecdsa.PrivateKey, error) {
+	cert, key, err := parseKeyPair(kp)
+	if err != nil {
+		return nil, nil, fmt.Errorf("ca: invalid CA cert/key: %w", err)
+	}
+	now := time.Now()
+	if !cert.IsCA || !cert.BasicConstraintsValid || cert.KeyUsage&x509.KeyUsageCertSign == 0 {
+		return nil, nil, fmt.Errorf("ca: certificate is not a signing CA")
+	}
+	if now.Before(cert.NotBefore) || !now.Before(cert.NotAfter) {
+		return nil, nil, fmt.Errorf("ca: CA certificate is expired or not yet valid")
+	}
+	if err := cert.CheckSignatureFrom(cert); err != nil {
+		return nil, nil, fmt.Errorf("ca: invalid root signature: %w", err)
+	}
+	return cert, key, nil
 }

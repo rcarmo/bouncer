@@ -2,10 +2,14 @@
 package config
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -25,6 +29,7 @@ type Config struct {
 }
 
 type ServerConfig struct {
+	HTTPListen     string     `json:"httpListen,omitempty"`
 	Listen         string     `json:"listen"`
 	PublicOrigin   string     `json:"publicOrigin"`
 	RPID           string     `json:"rpID"`
@@ -73,13 +78,15 @@ type SessionConfig struct {
 }
 
 type OnboardingConfig struct {
-	Enabled            bool   `json:"enabled"`
-	Token              string `json:"token"`
-	RotateTokenOnStart bool   `json:"rotateTokenOnStart"`
-	OneTimeToken       bool   `json:"oneTimeToken"`
-	LocalBypass        bool   `json:"localBypass"`
-	ProfileURL         string `json:"profileUrl"`
-	MacCertURL         string `json:"macCertUrl"`
+	Enabled            bool      `json:"enabled"`
+	Token              string    `json:"token"`
+	TokenExpiresAt     time.Time `json:"tokenExpiresAt,omitempty"`
+	TokenAttempts      int       `json:"tokenAttempts,omitempty"`
+	RotateTokenOnStart bool      `json:"rotateTokenOnStart"`
+	OneTimeToken       bool      `json:"oneTimeToken"`
+	LocalBypass        bool      `json:"localBypass"`
+	ProfileURL         string    `json:"profileUrl"`
+	MacCertURL         string    `json:"macCertUrl"`
 	Instructions       struct {
 		IOS []string `json:"ios"`
 	} `json:"instructions"`
@@ -124,11 +131,13 @@ type User struct {
 }
 
 type Credential struct {
-	ID         string   `json:"id"`
-	PublicKey  string   `json:"publicKey"`
-	SignCount  uint32   `json:"signCount"`
-	Transports []string `json:"transports"`
-	CreatedAt  string   `json:"createdAt"`
+	ID             string   `json:"id"`
+	PublicKey      string   `json:"publicKey"`
+	SignCount      uint32   `json:"signCount"`
+	Transports     []string `json:"transports"`
+	CreatedAt      string   `json:"createdAt"`
+	BackupEligible bool     `json:"backupEligible"`
+	BackupState    bool     `json:"backupState"`
 }
 
 // Defaults returns a Config with sensible defaults.
@@ -208,26 +217,17 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: parse: %w", err)
 	}
 	cfg.path = absPath
+	if err := cfg.Validate(); err != nil {
+		return nil, err
+	}
 	return cfg, nil
 }
 
 // Save persists the config atomically.
 func (c *Config) Save() error {
-	data, err := c.snapshot()
-	if err != nil {
-		return err
-	}
-	return atomicfile.Write(c.path, data, 0600)
-}
-
-func (c *Config) snapshot() ([]byte, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("config: marshal: %w", err)
-	}
-	return data, nil
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.saveLocked()
 }
 
 func (c *Config) saveLocked() error {
@@ -255,11 +255,17 @@ func (c *Config) SessionFilePath() string {
 func (c *Config) AddUser(u User) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	u = *cloneUser(&u)
 	if len(u.Credentials) > 0 && u.Credentials[0].CreatedAt == "" {
 		u.Credentials[0].CreatedAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	c.Users = append(c.Users, u)
-	return c.saveLocked()
+	old := c.Users
+	c.Users = append(c.Users, *cloneUser(&u))
+	if err := c.saveLocked(); err != nil {
+		c.Users = old
+		return err
+	}
+	return nil
 }
 
 // FindUserByCredentialID returns a user and credential index, or nil.
@@ -299,6 +305,9 @@ func cloneUser(u *User) *User {
 	}
 	clone := *u
 	clone.Credentials = append([]Credential(nil), u.Credentials...)
+	for i := range clone.Credentials {
+		clone.Credentials[i].Transports = append([]string(nil), u.Credentials[i].Transports...)
+	}
 	return &clone
 }
 
@@ -309,7 +318,11 @@ func normalizeSiteID(id string) string {
 	return id
 }
 
-// UpdateSignCount updates the sign count for a credential and saves.
+// ErrSignCount marks a replayed, cloned or out-of-order counter-bearing assertion.
+var ErrSignCount = errors.New("credential signature counter did not advance")
+
+// UpdateSignCount atomically checks and persists the counter. Zero-only
+// authenticators are supported; a nonzero counter must strictly increase.
 func (c *Config) UpdateSignCount(siteID, userID, credID string, count uint32) error {
 	siteID = normalizeSiteID(siteID)
 	c.mu.Lock()
@@ -318,11 +331,110 @@ func (c *Config) UpdateSignCount(siteID, userID, credID string, count uint32) er
 		if normalizeSiteID(c.Users[i].SiteID) == siteID && c.Users[i].ID == userID {
 			for j := range c.Users[i].Credentials {
 				if c.Users[i].Credentials[j].ID == credID {
+					old := c.Users[i].Credentials[j].SignCount
+					if (old != 0 || count != 0) && count <= old {
+						return ErrSignCount
+					}
 					c.Users[i].Credentials[j].SignCount = count
-					return c.saveLocked()
+					if err := c.saveLocked(); err != nil {
+						c.Users[i].Credentials[j].SignCount = old
+						return err
+					}
+					return nil
 				}
 			}
 		}
+	}
+	return nil
+}
+
+// EnrollmentTokenTTL and EnrollmentTokenMaxAttempts bound one-time enrollment.
+const EnrollmentTokenTTL = 10 * time.Minute
+const EnrollmentTokenMaxAttempts = 10
+
+// OnboardingSnapshot returns an independent, locked copy of onboarding settings.
+func (c *Config) OnboardingSnapshot() OnboardingConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	result := c.Onboarding
+	result.Instructions.IOS = append([]string(nil), result.Instructions.IOS...)
+	return result
+}
+
+// SetEnrollmentToken sets a fresh token and persists its lifetime and guess budget.
+// Callers must not mutate Onboarding.Token directly after serving requests.
+func (c *Config) SetEnrollmentToken(token string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	old := c.Onboarding
+	c.Onboarding.Token = strings.TrimSpace(token)
+	c.Onboarding.TokenAttempts = 0
+	c.Onboarding.TokenExpiresAt = time.Time{}
+	if c.Onboarding.Token != "" && c.Onboarding.OneTimeToken {
+		c.Onboarding.TokenExpiresAt = time.Now().Add(EnrollmentTokenTTL).UTC()
+	}
+	if err := c.saveLocked(); err != nil {
+		c.Onboarding = old
+		return err
+	}
+	return nil
+}
+
+// InitializeEnrollmentToken upgrades legacy one-time tokens once, persisting the
+// deadline so subsequent restarts cannot extend their lifetime.
+func (c *Config) InitializeEnrollmentToken() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if !c.Onboarding.OneTimeToken || c.Onboarding.Token == "" || !c.Onboarding.TokenExpiresAt.IsZero() {
+		return nil
+	}
+	c.Onboarding.TokenExpiresAt = time.Now().Add(EnrollmentTokenTTL).UTC()
+	if err := c.saveLocked(); err != nil {
+		c.Onboarding.TokenExpiresAt = time.Time{}
+		return err
+	}
+	return nil
+}
+
+// CheckEnrollmentToken checks and (when consume is true) durably consumes a
+// one-time token or records a failed guess. Persistence failures never authorize.
+func (c *Config) CheckEnrollmentToken(token string, consume bool) (bool, string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	state := c.Onboarding
+	current := strings.TrimSpace(state.Token)
+	if state.OneTimeToken && (state.TokenExpiresAt.IsZero() || !time.Now().Before(state.TokenExpiresAt) || state.TokenAttempts >= EnrollmentTokenMaxAttempts) {
+		return false, "", nil
+	}
+	if current == "" || token == "" {
+		return false, current, nil
+	}
+	valid := subtle.ConstantTimeCompare([]byte(token), []byte(current)) == 1
+	if consume && state.OneTimeToken {
+		if valid {
+			c.Onboarding.Token = ""
+		} else {
+			c.Onboarding.TokenAttempts++
+		}
+		if err := c.saveLocked(); err != nil {
+			c.Onboarding = state
+			return false, current, err
+		}
+	}
+	return valid, current, nil
+}
+
+// Validate rejects settings that would prevent authentication or overwrite state.
+func (c *Config) Validate() error {
+	if c.Session.TTLDays <= 0 || c.Session.TTLDays > 3650 {
+		return fmt.Errorf("config: session ttlDays must be between 1 and 3650")
+	}
+	cookie := http.Cookie{Name: c.Session.CookieName, Value: "validation"}
+	if err := cookie.Valid(); err != nil {
+		return fmt.Errorf("config: cookieName: %w", err)
+	}
+	if c.Session.File == "" || filepath.Clean(c.SessionFilePath()) == filepath.Clean(c.Path()) {
+		return fmt.Errorf("config: sessions must use a separate non-empty file")
 	}
 	return nil
 }

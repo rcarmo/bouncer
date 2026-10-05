@@ -542,3 +542,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - Audit log to file.
 - mTLS for backend.
 - Optional OIDC upstream integration.
+
+## October 2026 updates
+
+See [the audit](docs/AUDIT-2026-10.md) for fixes, verification and limits. One-time enrollment stores `tokenExpiresAt` and `tokenAttempts` (10 minutes, 10 incorrect non-empty guesses). Credentials store `backupEligible` and `backupState`. Optional `server.httpListen` selects the restart-only local HTTP bootstrap listener. Session settings and all listener addresses require restart. Test runs must use the allocation-profiling Make targets defined in [AGENTS.md](AGENTS.md).

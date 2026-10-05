@@ -13,9 +13,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
       - name: Run checks
         run: |
           set -e
           make deps
           make check
           make test
+          make test-race
+          make test-integration-race
+          make vuln
+      - name: Retain allocation evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: allocation-profiles-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/allocations/
+          if-no-files-found: error
+          retention-days: 14

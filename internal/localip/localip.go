@@ -52,7 +52,7 @@ func ParseTrustedProxies(cidrs []string) ([]*net.IPNet, error) {
 // IsTrustedProxy checks if ip is within any of the trusted proxy CIDRs.
 func IsTrustedProxy(ip net.IP, trusted []*net.IPNet) bool {
 	for _, n := range trusted {
-		if n.Contains(ip) {
+		if n != nil && n.Contains(ip) {
 			return true
 		}
 	}
@@ -83,86 +83,21 @@ func ClientIP(remoteAddr, xForwardedFor string, trusted []*net.IPNet) net.IP {
 	parts := strings.Split(xForwardedFor, ",")
 	for i := len(parts) - 1; i >= 0; i-- {
 		ip := net.ParseIP(strings.TrimSpace(parts[i]))
-		if ip != nil && !IsTrustedProxy(ip, trusted) {
+		if ip == nil {
+			return nil
+		}
+		if !IsTrustedProxy(ip, trusted) {
 			return ip
 		}
 	}
-	return remote
+	return nil
 }
 
-// ClientIPFromRequest returns the real client IP from a request, honoring trusted proxies
-// and common reverse proxy headers (including Cloudflare Tunnel headers).
+// ClientIPFromRequest uses only X-Forwarded-For from trusted peers. The proxy
+// must append its observed client address; alternate attribution headers are ignored.
 func ClientIPFromRequest(r *http.Request, trusted []*net.IPNet) net.IP {
 	if r == nil {
 		return nil
 	}
-	remote := ExtractIP(r.RemoteAddr)
-	if remote == nil {
-		return nil
-	}
-	if len(trusted) == 0 || !IsTrustedProxy(remote, trusted) {
-		return remote
-	}
-	if ip := headerIP(r.Header.Get("CF-Connecting-IP")); ip != nil {
-		return ip
-	}
-	if ip := headerIP(r.Header.Get("True-Client-IP")); ip != nil {
-		return ip
-	}
-	if ip := headerIP(r.Header.Get("X-Real-IP")); ip != nil {
-		return ip
-	}
-	if ip := forwardedClientIP(r.Header.Get("Forwarded"), trusted); ip != nil {
-		return ip
-	}
-	return ClientIP(r.RemoteAddr, r.Header.Get("X-Forwarded-For"), trusted)
-}
-
-func headerIP(value string) net.IP {
-	if value == "" {
-		return nil
-	}
-	parts := strings.Split(value, ",")
-	candidate := strings.TrimSpace(parts[0])
-	candidate = strings.Trim(candidate, "\"")
-	if strings.EqualFold(candidate, "unknown") {
-		return nil
-	}
-	if strings.HasPrefix(candidate, "[") && strings.Contains(candidate, "]") {
-		candidate = strings.TrimPrefix(candidate, "[")
-		candidate = strings.TrimSuffix(candidate, "]")
-	}
-	return ExtractIP(candidate)
-}
-
-func forwardedClientIP(value string, trusted []*net.IPNet) net.IP {
-	if value == "" {
-		return nil
-	}
-	entries := strings.Split(value, ",")
-	for i := len(entries) - 1; i >= 0; i-- {
-		entry := strings.TrimSpace(entries[i])
-		params := strings.Split(entry, ";")
-		for _, param := range params {
-			param = strings.TrimSpace(param)
-			lower := strings.ToLower(param)
-			if !strings.HasPrefix(lower, "for=") {
-				continue
-			}
-			forValue := strings.TrimSpace(param[4:])
-			forValue = strings.Trim(forValue, "\"")
-			if strings.EqualFold(forValue, "unknown") {
-				continue
-			}
-			if strings.HasPrefix(forValue, "[") && strings.Contains(forValue, "]") {
-				forValue = strings.TrimPrefix(forValue, "[")
-				forValue = strings.TrimSuffix(forValue, "]")
-			}
-			ip := ExtractIP(forValue)
-			if ip != nil && !IsTrustedProxy(ip, trusted) {
-				return ip
-			}
-		}
-	}
-	return nil
+	return ClientIP(r.RemoteAddr, strings.Join(r.Header.Values("X-Forwarded-For"), ","), trusted)
 }

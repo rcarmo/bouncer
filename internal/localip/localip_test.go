@@ -103,14 +103,14 @@ func TestClientIP(t *testing.T) {
 	}
 }
 
-func TestClientIPFromRequestCloudflare(t *testing.T) {
+func TestClientIPFromRequestIgnoresCloudflare(t *testing.T) {
 	trusted, _ := ParseTrustedProxies([]string{"127.0.0.1/32"})
 	req := httptest.NewRequest("GET", "http://example.com", nil)
 	req.RemoteAddr = "127.0.0.1:1234"
 	req.Header.Set("CF-Connecting-IP", "203.0.113.10")
 
 	ip := ClientIPFromRequest(req, trusted)
-	if ip == nil || ip.String() != "203.0.113.10" {
-		t.Fatalf("expected 203.0.113.10, got %v", ip)
+	if ip != nil {
+		t.Fatalf("missing XFF must not attribute a client, got %v", ip)
 	}
 }

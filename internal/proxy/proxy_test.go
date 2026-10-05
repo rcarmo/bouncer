@@ -143,3 +143,30 @@ func TestProxyPreservesQueryString(t *testing.T) {
 		t.Errorf("expected query q=hello&page=2, got %q", gotQuery)
 	}
 }
+
+func TestTrustedForwardedHeaders(t *testing.T) {
+	var got http.Header
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { got = r.Header.Clone() }))
+	defer backend.Close()
+	_, trusted, _ := net.ParseCIDR("127.0.0.1/32")
+	rp, _ := New(backend.URL, []*net.IPNet{trusted})
+	req := httptest.NewRequest("GET", "http://internal/", nil)
+	req.RemoteAddr = "127.0.0.1:1234"
+	req.Header.Set("X-Forwarded-For", "192.168.1.1, 203.0.113.5")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("X-Forwarded-Host", "public.example")
+	req.Header.Set("CF-Connecting-IP", "192.168.1.1")
+	rp.ServeHTTP(httptest.NewRecorder(), req)
+	for name, want := range map[string]string{"X-Forwarded-For": "203.0.113.5, 127.0.0.1", "X-Forwarded-Proto": "https", "X-Forwarded-Host": "public.example", "CF-Connecting-IP": ""} {
+		if got.Get(name) != want {
+			t.Errorf("%s=%q want %q", name, got.Get(name), want)
+		}
+	}
+}
+func TestInvalidBackend(t *testing.T) {
+	for _, target := range []string{"relative", "ftp://example.com", "http://", "http://example.com/#fragment"} {
+		if _, err := New(target, nil); err == nil {
+			t.Errorf("accepted %q", target)
+		}
+	}
+}

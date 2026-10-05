@@ -9,6 +9,13 @@ GOBIN ?= $(shell go env GOPATH)/bin
 export PATH := $(GOBIN):$(PATH)
 LINT_TOOLCHAIN ?= go1.26.0
 
+# Every test execution records allocations; no cached/unprofiled test recipes.
+PROFILE_ROOT ?= artifacts/allocations
+TEST_PACKAGES ?= ./...
+TEST_FLAGS ?=
+export PROFILE_ROOT TEST_PACKAGES TEST_FLAGS
+PROFILE_TEST = bash scripts/test-profile.sh
+
 IMAGE ?= $(notdir $(CURDIR))
 TAG ?= latest
 FULL_IMAGE := $(IMAGE):$(TAG)
@@ -60,7 +67,7 @@ install: deps ## Install project dependencies
 
 .PHONY: install-dev
 install-dev: ## Install dev tools (golangci-lint, gosec)
-	@command -v golangci-lint >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+	@command -v golangci-lint >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
 	@command -v gosec >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.24.6
 
 # =============================================================================
@@ -79,17 +86,17 @@ format: ## Format code
 	gofmt -s -w .
 
 .PHONY: test
-test: ## Run tests
-	go test ./...
+test: ## Run tests with per-package allocation profiles
+	$(PROFILE_TEST) test
 
 .PHONY: coverage
-coverage: ## Run tests with coverage
-	go test -coverprofile=coverage.out ./...
-	go tool cover -func=coverage.out
+coverage: ## Run coverage plus allocation profiling
+	$(PROFILE_TEST) coverage
 
 .PHONY: check
 check: ## Run standard validation pipeline
 	@$(MAKE) lint
+	@$(MAKE) workflow-check
 	@$(MAKE) build
 
 .PHONY: tidy
@@ -103,3 +110,39 @@ tidy: ## Tidy modules
 .PHONY: clean
 clean: ## Remove local build/test artifacts
 	rm -f $(BINARY) coverage.out
+
+.PHONY: test-race
+test-race: ## Run race tests with allocation profiles
+	$(PROFILE_TEST) race
+
+.PHONY: test-integration
+test-integration: ## Profile authenticated SSE/WebSockets and reload in a real process
+	$(PROFILE_TEST) integration
+
+.PHONY: test-browser
+test-browser: ## Profile Bouncer during Chromium passkey/SSE/WS smoke tests
+	$(PROFILE_TEST) browser
+
+.PHONY: workflow-check
+workflow-check: ## Validate GitHub Actions workflows
+	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+
+.PHONY: vuln
+vuln: ## Check reachable Go vulnerabilities
+	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+.PHONY: test-browser-tls
+test-browser-tls: ## Profile local-TLS Chromium and HTTP trust onboarding tests
+	$(PROFILE_TEST) browser-tls
+
+.PHONY: test-integration-race
+test-integration-race: ## Profile race-instrumented process reload/stream tests
+	$(PROFILE_TEST) integration-race
+
+.PHONY: bench
+bench: ## Run benchmarks with B/op, allocs/op and allocation profiles
+	$(PROFILE_TEST) bench
+
+.PHONY: clean-profiles
+clean-profiles: ## Explicitly delete retained local allocation evidence
+	rm -rf -- "$(PROFILE_ROOT)"

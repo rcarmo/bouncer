@@ -28,7 +28,7 @@ A Go-based reverse proxy that protects backend HTTP services with [WebAuthn](htt
 make build
 
 # Run with onboarding enabled
-./bouncer --cloudflare --onboarding --backend http://localhost:3000
+./bouncer --cloudflare --onboarding --hostname bouncer.example.com --backend http://localhost:3000
 
 # Visit your Cloudflare hostname → /onboarding
 # Start registration to trigger a one-time token (printed to logs and sent via Pushover)
@@ -47,7 +47,7 @@ make build
 ### Docker
 
 ```bash
-make docker
+make docker-build
 docker run -p 443:443 -p 80:80 -v $(pwd)/data:/data bouncer \
   --config /data/bouncer.json --onboarding --backend http://host.docker.internal:3000
 ```
@@ -243,3 +243,39 @@ See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the package layout and desi
 ## License
 
 [MIT](LICENSE) © 2026 Rui Carmo
+
+## Validation and allocation profiling
+
+See [the October 2026 audit](docs/AUDIT-2026-10.md) and [development instructions](AGENTS.md).
+
+Every test target records allocation profiles, matching binaries and `alloc_space`/`alloc_objects` summaries in a unique `artifacts/allocations/` directory. Integration/browser tests also profile each Bouncer server process. No profiling endpoint is included in production builds.
+
+```sh
+make test
+make test-race
+make coverage
+make test-integration-race
+make check
+make vuln
+make bench TEST_PACKAGES='./internal/session ./internal/site'
+# Focused regression, still fully profiled:
+make test TEST_PACKAGES=./internal/session TEST_FLAGS='-run TestSessionPersistenceFailure'
+# Requires Bun and Playwright Chromium:
+bun install
+make test-browser
+make test-browser-tls
+```
+
+Use `make clean-profiles` to remove allocation evidence explicitly. Normal `make clean` preserves it. Compare equivalent workloads using `go tool pprof -alloc_space -base OLD.pprof NEW.pprof` (also `-alloc_objects`) and benchmark B/op / allocs/op.
+
+## Proxy deployment requirements
+
+Trusted proxies must overwrite `X-Forwarded-Host`/`X-Forwarded-Proto` and append the observed client address to `X-Forwarded-For`. Bouncer walks XFF right-to-left across trusted hops. Alternative client-IP headers do not authorise enrollment. Missing/malformed attribution never grants local bypass. Disable `onboarding.localBypass` when LAN membership must not permit enrollment.
+
+One-time tokens expire after 10 minutes or 10 incorrect non-empty guesses across all client IPs. Expiry/attempts survive restart. Successful registration options consume the token.
+
+Existing SSE/WebSocket connections retain their backend across SIGHUP; new requests use the new configuration. Removing a user blocks subsequent requests but does not terminate established streams. Session settings and listener addresses require restart.
+
+For local TLS, optional `server.httpListen` overrides the separate trust/download listener (default `:80`, or `:8080` with a nonstandard TLS port). HTTP onboarding links to the canonical HTTPS origin. Shared-host port aliases are ambiguous on the HTTP bootstrap listener; use their explicit HTTPS URLs.
+
+Existing synced passkeys created before backup flags were stored may need re-enrollment. Disable onboarding after provisioning and run only one Bouncer writer per config/session pair.

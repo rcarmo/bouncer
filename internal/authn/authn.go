@@ -7,7 +7,9 @@ import (
 	"encoding/base64"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -84,6 +86,9 @@ func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *s
 	if sites == nil {
 		return nil, fmt.Errorf("authn: sites registry is nil")
 	}
+	if err := cfg.InitializeEnrollmentToken(); err != nil {
+		return nil, fmt.Errorf("authn: token initialization: %w", err)
+	}
 	wanBySite := make(map[string]*webauthn.WebAuthn)
 	for _, s := range sites.Sites {
 		wan, err := webauthn.New(&webauthn.Config{
@@ -104,7 +109,7 @@ func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *s
 		trusted:       trusted,
 		challenges:    make(map[string]*challengeEntry),
 		rate:          make(map[string]*rateEntry),
-		geoProvider:   notify.NewGeoProvider(cfg.Onboarding.GeoIP, filepath.Dir(cfg.Path())),
+		geoProvider:   notify.NewGeoProvider(cfg.OnboardingSnapshot().GeoIP, filepath.Dir(cfg.Path())),
 		rateLimit:     20,
 		rateWindow:    time.Minute,
 		blockDuration: 5 * time.Minute,
@@ -118,6 +123,13 @@ func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *s
 // Close stops background cleanup work. It is used when hot-reloading the
 // handler so SIGHUP does not leave old cleanup goroutines behind.
 func (h *Handler) Close() {
+	if h != nil {
+		if closer, ok := h.geoProvider.(io.Closer); ok {
+			if err := closer.Close(); err != nil {
+				slog.Warn("geoip close failed", "error", err)
+			}
+		}
+	}
 	if h == nil || h.stopCleanup == nil {
 		return
 	}
@@ -156,6 +168,7 @@ func (u *webauthnUser) WebAuthnCredentials() []webauthn.Credential {
 			ID:              credID,
 			PublicKey:       pubKey,
 			AttestationType: "",
+			Flags:           webauthn.CredentialFlags{BackupEligible: c.BackupEligible, BackupState: c.BackupState},
 			Authenticator: webauthn.Authenticator{
 				SignCount: c.SignCount,
 			},
@@ -175,7 +188,7 @@ func (u *webauthnUser) WebAuthnIcon() string { return "" }
 // RegisterOptions handles POST /webauthn/register/options.
 func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 	setNoStore(w)
-	if !h.cfg.Onboarding.Enabled {
+	if !h.cfg.OnboardingSnapshot().Enabled {
 		writeJSONError(w, http.StatusForbidden, "registration disabled")
 		return
 	}
@@ -191,21 +204,41 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		Name        string `json:"name"`
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, "bad request")
 		return
 	}
-	if len(req.DisplayName) > maxNameLen || len(req.Name) > maxNameLen {
+	if decoder.Decode(new(any)) != io.EOF {
+		writeJSONError(w, http.StatusBadRequest, "bad request")
+		return
+	}
+	if len(req.Token) > maxNameLen || len(req.DisplayName) > maxNameLen || len(req.Name) > maxNameLen {
 		writeJSONError(w, http.StatusBadRequest, "input too long")
 		return
 	}
 
+	// Resolve site.
+	siteCfg, wan, err := h.siteForRequest(r)
+	if err != nil {
+		writeJSONError(w, http.StatusNotFound, "unknown site")
+		return
+	}
+	if !h.validOrigin(r, siteCfg) {
+		writeJSONError(w, http.StatusForbidden, "invalid origin")
+		return
+	}
+
 	bypass := h.isLocalBypass(r)
-	if h.cfg.Onboarding.OneTimeToken && !bypass {
+	if h.cfg.OnboardingSnapshot().OneTimeToken && !bypass {
 		h.maybeAnnounceToken(r, h.peekToken())
 	}
 
-	validToken, bypass, currentToken := h.validateToken(r, strings.TrimSpace(req.Token))
+	validToken, bypass, currentToken, tokenErr := h.validateToken(r, strings.TrimSpace(req.Token))
+	if tokenErr != nil {
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 	go h.notifyEnrollmentAttempt(enrollmentMeta{
 		Token:         currentToken,
 		TokenProvided: strings.TrimSpace(req.Token) != "",
@@ -221,27 +254,16 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		GeoHeaders:    h.geoHeadersFromRequest(r),
 	})
 	if !validToken {
-		if !bypass && h.cfg.Onboarding.OneTimeToken && currentToken == "" {
+		if !bypass && h.cfg.OnboardingSnapshot().OneTimeToken && currentToken == "" {
 			tokenValue, err := h.issueToken()
 			if err != nil {
 				slog.Error("failed to issue enrollment token", "error", err)
 				writeJSONError(w, http.StatusInternalServerError, "internal error")
 				return
 			}
-			h.announceEnrollmentToken(r, tokenValue)
+			h.maybeAnnounceToken(r, tokenValue)
 		}
 		writeJSONError(w, http.StatusForbidden, "invalid token")
-		return
-	}
-
-	// Resolve site.
-	siteCfg, wan, err := h.siteForRequest(r)
-	if err != nil {
-		writeJSONError(w, http.StatusNotFound, "unknown site")
-		return
-	}
-	if !h.validOrigin(r, siteCfg) {
-		writeJSONError(w, http.StatusForbidden, "invalid origin")
 		return
 	}
 
@@ -267,7 +289,7 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		},
 	}
 
-	options, sessionData, err := wan.BeginRegistration(tmpUser)
+	options, sessionData, err := wan.BeginRegistration(tmpUser, webauthn.WithResidentKeyRequirement(protocol.ResidentKeyRequirementRequired))
 	if err != nil {
 		slog.Error("webauthn: begin registration", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
@@ -308,7 +330,7 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 // RegisterVerify handles POST /webauthn/register/verify.
 func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	setNoStore(w)
-	if !h.cfg.Onboarding.Enabled {
+	if !h.cfg.OnboardingSnapshot().Enabled {
 		writeJSONError(w, http.StatusForbidden, "registration disabled")
 		return
 	}
@@ -338,9 +360,6 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 
 	h.mu.Lock()
 	entry, ok := h.challenges[challengeID]
-	if ok {
-		delete(h.challenges, challengeID)
-	}
 	h.mu.Unlock()
 	if !ok || time.Now().After(entry.expires) {
 		writeJSONError(w, http.StatusBadRequest, "challenge expired")
@@ -364,6 +383,15 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "invalid user")
 		return
 	}
+
+	h.mu.Lock()
+	if h.challenges[challengeID] != entry {
+		h.mu.Unlock()
+		writeJSONError(w, http.StatusBadRequest, "challenge expired")
+		return
+	}
+	delete(h.challenges, challengeID)
+	h.mu.Unlock()
 
 	wan, ok := h.wanBySite[entry.siteID]
 	if !ok {
@@ -401,11 +429,13 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 		Name:        entry.name,
 		Credentials: []config.Credential{
 			{
-				ID:         base64.RawURLEncoding.EncodeToString(credential.ID),
-				PublicKey:  base64.RawURLEncoding.EncodeToString(credential.PublicKey),
-				SignCount:  credential.Authenticator.SignCount,
-				Transports: transports,
-				CreatedAt:  time.Now().UTC().Format(time.RFC3339),
+				ID:             base64.RawURLEncoding.EncodeToString(credential.ID),
+				PublicKey:      base64.RawURLEncoding.EncodeToString(credential.PublicKey),
+				SignCount:      credential.Authenticator.SignCount,
+				BackupEligible: credential.Flags.BackupEligible,
+				BackupState:    credential.Flags.BackupState,
+				Transports:     transports,
+				CreatedAt:      time.Now().UTC().Format(time.RFC3339),
 			},
 		},
 	}
@@ -496,9 +526,6 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 
 	h.mu.Lock()
 	entry, ok := h.challenges[challengeID]
-	if ok {
-		delete(h.challenges, challengeID)
-	}
 	h.mu.Unlock()
 	if !ok || time.Now().After(entry.expires) {
 		writeJSONError(w, http.StatusBadRequest, "challenge expired")
@@ -514,6 +541,20 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "invalid origin")
 		return
 	}
+
+	if entry.userID != "" {
+		writeJSONError(w, http.StatusBadRequest, "invalid challenge")
+		return
+	}
+
+	h.mu.Lock()
+	if h.challenges[challengeID] != entry {
+		h.mu.Unlock()
+		writeJSONError(w, http.StatusBadRequest, "challenge expired")
+		return
+	}
+	delete(h.challenges, challengeID)
+	h.mu.Unlock()
 
 	wan, ok := h.wanBySite[entry.siteID]
 	if !ok {
@@ -542,6 +583,11 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if credential.Authenticator.CloneWarning {
+		writeJSONError(w, http.StatusUnauthorized, "authentication failed")
+		return
+	}
+
 	// Find user by credential to update sign count.
 	credIDStr := base64.RawURLEncoding.EncodeToString(credential.ID)
 	user, _ := h.cfg.FindUserByCredentialID(entry.siteID, credIDStr)
@@ -552,7 +598,15 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	_ = h.cfg.UpdateSignCount(entry.siteID, user.ID, credIDStr, credential.Authenticator.SignCount)
+	if err := h.cfg.UpdateSignCount(entry.siteID, user.ID, credIDStr, credential.Authenticator.SignCount); err != nil {
+		if errors.Is(err, config.ErrSignCount) {
+			writeJSONError(w, http.StatusUnauthorized, "authentication failed")
+			return
+		}
+		slog.Error("webauthn: save sign count", "error", err)
+		writeJSONError(w, http.StatusInternalServerError, "internal error")
+		return
+	}
 
 	sessID, err := h.sess.Create(entry.siteID, user.ID)
 	if err != nil {
@@ -580,9 +634,10 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusForbidden, "invalid origin")
 		return
 	}
+	var deleteErr error
 	cookie, err := r.Cookie(h.cfg.Session.CookieName)
 	if err == nil {
-		h.sess.Delete(cookie.Value)
+		deleteErr = h.sess.Delete(cookie.Value)
 	}
 	http.SetCookie(w, &http.Cookie{
 		Name:     h.cfg.Session.CookieName,
@@ -593,6 +648,11 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		Secure:   h.cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 	})
+	if deleteErr != nil {
+		slog.Error("logout: persist deletion", "error", deleteErr)
+		writeJSONError(w, http.StatusInternalServerError, "logout persistence failed")
+		return
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
 		slog.Warn("webauthn: write response", "error", err)
@@ -627,7 +687,7 @@ type enrollmentTokenMeta struct {
 }
 
 func (h *Handler) notifyEnrollmentAttempt(meta enrollmentMeta) {
-	cfg := h.cfg.Onboarding
+	cfg := h.cfg.OnboardingSnapshot()
 	if !cfg.Pushover.Enabled {
 		return
 	}
@@ -695,6 +755,7 @@ func (h *Handler) announceEnrollmentToken(r *http.Request, token string) {
 		return
 	}
 	ip := h.clientIP(r)
+	// #nosec G706 -- structured fields; IP is parsed and token is generated locally or admin-configured.
 	slog.Info("enrollment token issued", "token", token, "ip", ip)
 	fmt.Printf("\n  Enrollment Token: %s\n\n", token)
 	go h.notifyEnrollmentToken(enrollmentTokenMeta{
@@ -709,7 +770,7 @@ func (h *Handler) announceEnrollmentToken(r *http.Request, token string) {
 }
 
 func (h *Handler) notifyEnrollmentToken(meta enrollmentTokenMeta) {
-	cfg := h.cfg.Onboarding
+	cfg := h.cfg.OnboardingSnapshot()
 	if !cfg.Pushover.Enabled {
 		return
 	}
@@ -764,33 +825,37 @@ func (h *Handler) notifyEnrollmentToken(meta enrollmentTokenMeta) {
 	}
 }
 
-func (h *Handler) isLocalBypass(r *http.Request) bool {
-	if !h.cfg.Onboarding.LocalBypass {
+// IsLocalBypass is the shared attribution policy for enrollment and the auth UI.
+func (h *Handler) IsLocalBypass(r *http.Request) bool {
+	if !h.cfg.OnboardingSnapshot().LocalBypass {
 		return false
 	}
 	clientIP := localip.ClientIPFromRequest(r, h.trusted)
 	return clientIP != nil && localip.IsLocal(clientIP)
 }
 
+func (h *Handler) isLocalBypass(r *http.Request) bool { return h.IsLocalBypass(r) }
+
 func (h *Handler) peekToken() string {
-	h.tokenMu.Lock()
-	defer h.tokenMu.Unlock()
-	return strings.TrimSpace(h.cfg.Onboarding.Token)
+	_, current, _ := h.cfg.CheckEnrollmentToken("", false)
+	return current
 }
 
+// issueToken is issue-if-absent; tokenMu covers checking, generation and persistence.
 func (h *Handler) issueToken() (string, error) {
+	h.tokenMu.Lock()
+	defer h.tokenMu.Unlock()
+	if current := h.peekToken(); current != "" {
+		return current, nil
+	}
 	value, err := enrolltoken.Generate()
 	if err != nil {
 		return "", err
 	}
-	h.tokenMu.Lock()
-	h.cfg.Onboarding.Token = value
-	h.tokenAnnounced = false
-	saveErr := h.cfg.Save()
-	h.tokenMu.Unlock()
-	if saveErr != nil {
-		slog.Warn("failed to save enrollment token", "error", saveErr)
+	if err := h.cfg.SetEnrollmentToken(value); err != nil {
+		return "", err
 	}
+	h.tokenAnnounced = false
 	return value, nil
 }
 
@@ -799,7 +864,7 @@ func (h *Handler) maybeAnnounceToken(r *http.Request, token string) {
 		return
 	}
 	h.tokenMu.Lock()
-	if h.tokenAnnounced || strings.TrimSpace(h.cfg.Onboarding.Token) != token {
+	if h.tokenAnnounced || h.peekToken() != token {
 		h.tokenMu.Unlock()
 		return
 	}
@@ -808,37 +873,29 @@ func (h *Handler) maybeAnnounceToken(r *http.Request, token string) {
 	h.announceEnrollmentToken(r, token)
 }
 
-func (h *Handler) validateToken(r *http.Request, token string) (valid bool, bypass bool, current string) {
-	if h.isLocalBypass(r) {
-		return true, true, ""
+func (h *Handler) validateToken(r *http.Request, token string) (valid bool, bypass bool, current string, err error) {
+	if h.IsLocalBypass(r) {
+		return true, true, "", nil
 	}
-	token = strings.TrimSpace(token)
 	h.tokenMu.Lock()
 	defer h.tokenMu.Unlock()
-	current = strings.TrimSpace(h.cfg.Onboarding.Token)
-	if current == "" || token == "" || token != current {
-		return false, false, current
+	valid, current, err = h.cfg.CheckEnrollmentToken(strings.TrimSpace(token), true)
+	if err != nil {
+		slog.Error("enrollment: persist token validation", "error", err)
+		return false, false, current, err
 	}
-	if h.cfg.Onboarding.OneTimeToken {
-		h.cfg.Onboarding.Token = ""
+	if valid {
 		h.tokenAnnounced = false
-		if err := h.cfg.Save(); err != nil {
-			slog.Warn("failed to save config", "error", err)
-		}
 	}
-	return true, false, current
+	return valid, false, current, nil
 }
 
 func (h *Handler) tokenStatus(r *http.Request, token string) (valid bool, bypass bool, current string) {
-	if h.isLocalBypass(r) {
+	if h.IsLocalBypass(r) {
 		return true, true, ""
 	}
-	token = strings.TrimSpace(token)
-	current = h.peekToken()
-	if current == "" || token == "" {
-		return false, false, current
-	}
-	return token == current, false, current
+	valid, current, _ = h.cfg.CheckEnrollmentToken(strings.TrimSpace(token), false)
+	return valid, false, current
 }
 
 func (h *Handler) isTokenValid(r *http.Request, token string) bool {
@@ -917,6 +974,9 @@ func originMatches(origin string, siteOrigin string) bool {
 	}
 	siteURL, err := url.Parse(siteOrigin)
 	if err != nil {
+		return false
+	}
+	if originURL.User != nil || originURL.Host == "" || originURL.Path != "" || originURL.RawQuery != "" || originURL.Fragment != "" || originURL.ForceQuery || (originURL.Scheme != "https" && originURL.Scheme != "http") {
 		return false
 	}
 	if !strings.EqualFold(originURL.Scheme, siteURL.Scheme) {

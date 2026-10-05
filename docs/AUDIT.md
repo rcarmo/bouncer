@@ -1,4 +1,6 @@
 # Bouncer Audit Report
+Latest: [October 2026 end-to-end audit](AUDIT-2026-10.md). The findings below are historical.
+
 
 **Audited by:** GPT-5.2-Codex  
 **Date:** 2026-02-28  

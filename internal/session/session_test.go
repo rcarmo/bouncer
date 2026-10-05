@@ -57,7 +57,9 @@ func TestDelete(t *testing.T) {
 	defer store.Stop()
 
 	id, _ := store.Create("default", "user-1")
-	store.Delete(id)
+	if err := store.Delete(id); err != nil {
+		t.Fatal(err)
+	}
 
 	if store.Get(id) != nil {
 		t.Error("expected nil after delete")
@@ -137,7 +139,9 @@ func TestDeleteDoesNotAffectOthers(t *testing.T) {
 
 	id1, _ := store.Create("default", "user-1")
 	id2, _ := store.Create("default", "user-2")
-	store.Delete(id1)
+	if err := store.Delete(id1); err != nil {
+		t.Fatal(err)
+	}
 
 	if store.Get(id1) != nil {
 		t.Error("deleted session should be nil")

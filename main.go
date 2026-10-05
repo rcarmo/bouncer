@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"flag"
 	"fmt"
+	"html"
 	"log/slog"
 	"net"
 	"net/http"
@@ -31,6 +32,9 @@ import (
 
 var version = "dev"
 
+// Test-only builds install a profiler; production leaves this a no-op.
+var finishAllocationProfile = func() {}
+
 const (
 	readHeaderTimeout = 5 * time.Second
 	readTimeout       = 15 * time.Second
@@ -51,6 +55,7 @@ func (s *stringSlice) Set(v string) error {
 }
 
 func main() {
+	defer finishAllocationProfile()
 	var (
 		configPath string
 		listen     string
@@ -126,9 +131,12 @@ func main() {
 		}
 	}
 
+	applyCLIOrigin(cfg, hostnames, ips)
 	// Onboarding mode.
-	cfg.Onboarding.Enabled = onboarding
 	if onboarding {
+		cfg.Onboarding.Enabled = true
+	}
+	if cfg.Onboarding.Enabled {
 		if cfg.Onboarding.OneTimeToken {
 			slog.Info("=== ONBOARDING MODE ACTIVE ===")
 			slog.Info("enrollment tokens are one-time and issued on demand")
@@ -139,8 +147,10 @@ func main() {
 					slog.Error("failed to generate token", "error", err)
 					os.Exit(1)
 				}
-				cfg.Onboarding.Token = t
-				_ = cfg.Save()
+				if err := cfg.SetEnrollmentToken(t); err != nil {
+					slog.Error("save enrollment token", "error", err)
+					os.Exit(1)
+				}
 			}
 			slog.Info("=== ONBOARDING MODE ACTIVE ===")
 			slog.Info("enrollment token", "token", cfg.Onboarding.Token)
@@ -217,7 +227,7 @@ func main() {
 		slog.Warn("mDNS announcements disabled", "error", err)
 		mdnsAnnouncer = &mdns.Announcer{}
 	}
-	defer mdnsAnnouncer.Close()
+	defer func() { mdnsAnnouncer.Close() }()
 
 	// Route/auth state is hot-swappable on SIGHUP. Handlers copy the current
 	// pointers under the lock and then release it before proxying long-lived
@@ -229,21 +239,7 @@ func main() {
 		defer stateMu.RUnlock()
 		return cfg
 	}
-	currentSites := func() *site.Registry {
-		stateMu.RLock()
-		defer stateMu.RUnlock()
-		return siteRegistry
-	}
-	currentAuthn := func() *authn.Handler {
-		stateMu.RLock()
-		defer stateMu.RUnlock()
-		return authnHandler
-	}
-	currentProxy := func(siteID string) http.Handler {
-		stateMu.RLock()
-		defer stateMu.RUnlock()
-		return proxyBySite[siteID]
-	}
+
 	currentTrusted := func() []*net.IPNet {
 		stateMu.RLock()
 		defer stateMu.RUnlock()
@@ -260,146 +256,32 @@ func main() {
 		}
 		return listens
 	}
-	defer func() { currentAuthn().Close() }()
+	defer func() { authnHandler.Close() }()
 
-	// Router.
-	mux := http.NewServeMux()
-
-	// WebAuthn API routes. These dispatch through currentAuthn() so a SIGHUP
-	// config reload can add hostnames/sites without restarting the process.
-	mux.HandleFunc("POST /webauthn/register/options", func(w http.ResponseWriter, r *http.Request) { currentAuthn().RegisterOptions(w, r) })
-	mux.HandleFunc("POST /webauthn/register/verify", func(w http.ResponseWriter, r *http.Request) { currentAuthn().RegisterVerify(w, r) })
-	mux.HandleFunc("POST /webauthn/login/options", func(w http.ResponseWriter, r *http.Request) { currentAuthn().LoginOptions(w, r) })
-	mux.HandleFunc("POST /webauthn/login/verify", func(w http.ResponseWriter, r *http.Request) { currentAuthn().LoginVerify(w, r) })
-	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) { currentAuthn().Logout(w, r) })
-
-	// UI routes.
-	mux.HandleFunc("GET /static/icon-256.png", func(w http.ResponseWriter, r *http.Request) {
-		data, err := web.Static.ReadFile("icon-256.png")
-		if err != nil {
-			http.NotFound(w, r)
-			return
-		}
-		w.Header().Set("Content-Type", "image/png")
-		if _, err := w.Write(data); err != nil {
-			slog.Warn("write icon", "error", err)
-		}
-	})
-	mux.HandleFunc("GET /login", func(w http.ResponseWriter, r *http.Request) {
-		if currentSites().Resolve(r) == nil {
-			http.NotFound(w, r)
-			return
-		}
-		data, _ := web.Static.ReadFile("login.html")
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if _, err := w.Write(data); err != nil {
-			slog.Warn("write login page", "error", err)
-		}
-	})
-	mux.HandleFunc("GET /onboarding", func(w http.ResponseWriter, r *http.Request) {
-		curCfg := currentConfig()
-		if currentSites().Resolve(r) == nil {
-			http.NotFound(w, r)
-			return
-		}
-		if !curCfg.Onboarding.Enabled {
-			http.Redirect(w, r, "/login", http.StatusFound)
-			return
-		}
-		data, _ := web.Static.ReadFile("onboarding.html")
-		html := string(data)
-		// Inject local bypass meta tag if applicable.
-		if curCfg.Onboarding.LocalBypass {
-			clientIP := localip.ExtractIP(r.RemoteAddr)
-			if clientIP != nil && localip.IsLocal(clientIP) {
-				html = strings.Replace(html, "<head>",
-					"<head>\n<meta name=\"local-bypass\" content=\"true\">", 1)
-			}
-		}
-		if curCfg.Server.Cloudflare {
-			html = strings.Replace(html, "<head>",
-				"<head>\n<meta name=\"cloudflare\" content=\"true\">", 1)
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if _, err := w.Write([]byte(html)); err != nil {
-			slog.Warn("write onboarding page", "error", err)
-		}
-	})
-
-	// Cert routes (local TLS mode only).
-	if !cfg.Server.Cloudflare {
-		mux.HandleFunc("GET /certs/rootCA.mobileconfig", func(w http.ResponseWriter, r *http.Request) {
-			data, err := ca.GenerateMobileconfig(currentConfig())
-			if err != nil {
-				http.Error(w, "failed to generate profile", http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/x-apple-aspen-config")
-			w.Header().Set("Content-Disposition", "attachment; filename=bouncer.mobileconfig")
-			if _, err := w.Write(data); err != nil {
-				slog.Warn("write mobileconfig", "error", err)
-			}
-		})
-		mux.HandleFunc("GET /certs/rootCA.cer", func(w http.ResponseWriter, r *http.Request) {
-			der, err := ca.CACertDER(currentConfig())
-			if err != nil {
-				http.Error(w, "failed to get CA cert", http.StatusInternalServerError)
-				return
-			}
-			w.Header().Set("Content-Type", "application/x-x509-ca-cert")
-			w.Header().Set("Content-Disposition", "attachment; filename=bouncer-ca.cer")
-			if _, err := w.Write(der); err != nil {
-				slog.Warn("write ca cert", "error", err)
-			}
-		})
-	}
-
-	// All other routes: authenticated proxy.
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		curCfg := currentConfig()
-		siteCfg := currentSites().Resolve(r)
-		if siteCfg == nil {
-			http.NotFound(w, r)
-			return
-		}
-		// Check session.
-		cookie, err := r.Cookie(curCfg.Session.CookieName)
-		if err == nil {
-			sess := sessStore.Get(cookie.Value)
-			if sess != nil && sess.SiteID == siteCfg.ID {
-				if rp := currentProxy(siteCfg.ID); rp != nil {
-					rp.ServeHTTP(w, r)
-					return
-				}
-				http.Error(w, "proxy not configured", http.StatusBadGateway)
-				return
-			}
-		}
-		// Not authenticated.
-		if r.Method == http.MethodGet && r.URL.Path == "/" {
-			data, _ := web.Static.ReadFile("landing.html")
-			html := string(data)
-			html = strings.Replace(html, "<head>", fmt.Sprintf("<head>\n<meta name=\"onboarding\" content=\"%t\">", curCfg.Onboarding.Enabled), 1)
-			w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			if _, err := w.Write([]byte(html)); err != nil {
-				slog.Warn("write landing page", "error", err)
-			}
-			return
-		}
-		if curCfg.Onboarding.Enabled {
-			http.Redirect(w, r, "/onboarding", http.StatusFound)
-		} else {
-			http.Redirect(w, r, "/login", http.StatusFound)
-		}
-	})
+	var authGate sync.RWMutex
+	activeHandler := newRouter(cfg, siteRegistry, authnHandler, proxyBySite, sessStore, trustedNets)
 
 	// Shutdown context.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	handler := withSecurityHeaders(mux, currentTrusted)
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/webauthn/") || r.URL.Path == "/logout" {
+			authGate.RLock()
+			defer authGate.RUnlock()
+		}
+		stateMu.RLock()
+		next := activeHandler
+		stateMu.RUnlock()
+		next.ServeHTTP(w, r)
+	})
 
 	reloadConfig := func() error {
+		authGate.Lock()
+		defer authGate.Unlock()
+		if _, err := os.Stat(configPath); err != nil {
+			return fmt.Errorf("reload config: %w", err)
+		}
 		nextCfg, err := config.Load(configPath)
 		if err != nil {
 			return fmt.Errorf("load config: %w", err)
@@ -425,7 +307,10 @@ func main() {
 				nextCfg.Server.IPAddresses = ips
 			}
 		}
-		nextCfg.Onboarding.Enabled = onboarding
+		applyCLIOrigin(nextCfg, hostnames, ips)
+		if onboarding {
+			nextCfg.Onboarding.Enabled = true
+		}
 
 		stateMu.RLock()
 		oldListen := cfg.Server.Listen
@@ -440,6 +325,15 @@ func main() {
 			nextCfg.Server.Cloudflare = oldCloudflare
 		}
 
+		if nextCfg.Session != cfg.Session {
+			return fmt.Errorf("session settings require restart")
+		}
+		if nextCfg.Server.HTTPListen != cfg.Server.HTTPListen {
+			return fmt.Errorf("HTTP bootstrap listener changes require restart")
+		}
+		if !sameListeners(cfg, nextCfg) {
+			return fmt.Errorf("site listener changes require restart")
+		}
 		if nextCfg.Server.Cloudflare {
 			nextCfg.Server.TrustedProxies = uniqueStrings(append(nextCfg.Server.TrustedProxies, "127.0.0.1/32", "::1/128"))
 		}
@@ -467,6 +361,12 @@ func main() {
 		if err != nil {
 			return fmt.Errorf("webauthn: %w", err)
 		}
+		committed := false
+		defer func() {
+			if !committed {
+				nextAuthn.Close()
+			}
+		}()
 		nextProxyBySite := make(map[string]http.Handler)
 		for _, s := range nextSites.Sites {
 			rp, err := proxy.New(s.Backend, nextTrusted)
@@ -482,6 +382,11 @@ func main() {
 			nextMDNS = &mdns.Announcer{}
 		}
 
+		defer func() {
+			if !committed {
+				nextMDNS.Close()
+			}
+		}()
 		var nextTLSCert tls.Certificate
 		if !nextCfg.Server.Cloudflare {
 			certPEM, keyPEM, err := ca.ServerTLSKeyPair(nextCfg)
@@ -506,6 +411,8 @@ func main() {
 			currentTLSCert = nextTLSCert
 		}
 		mdnsAnnouncer = nextMDNS
+		activeHandler = newRouter(nextCfg, nextSites, nextAuthn, nextProxyBySite, sessStore, nextTrusted)
+		committed = true
 		stateMu.Unlock()
 		oldAuthn.Close()
 		oldMDNS.Close()
@@ -513,17 +420,39 @@ func main() {
 		return nil
 	}
 
-	reloadCh := make(chan os.Signal, 1)
-	signal.Notify(reloadCh, syscall.SIGHUP)
-	go func() {
-		for range reloadCh {
-			if err := reloadConfig(); err != nil {
-				slog.Error("config reload failed", "error", err)
+	// Start reload processing only after initial state/certificates/listeners are
+	// fully initialized; stop and join it before retiring the active generation.
+	startReload := func() func() {
+		reloadCh := make(chan os.Signal, 1)
+		signal.Notify(reloadCh, syscall.SIGHUP)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-reloadCh:
+					if err := reloadConfig(); err != nil {
+						slog.Error("config reload failed", "error", err)
+					}
+				}
+			}
+		}()
+		return func() { signal.Stop(reloadCh); <-done }
+	}
+
+	var servers []*http.Server
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		for _, srv := range servers {
+			if err := srv.Shutdown(ctx); err != nil {
+				_ = srv.Close()
 			}
 		}
 	}()
-
-	startHTTPServer := func(ctx context.Context, addr string, handler http.Handler) *http.Server {
+	startHTTPServer := func(addr string, handler http.Handler) *http.Server {
 		srv := &http.Server{
 			Addr:              addr,
 			Handler:           handler,
@@ -539,16 +468,11 @@ func main() {
 				os.Exit(1)
 			}
 		}()
-		go func() {
-			<-ctx.Done()
-			if err := srv.Shutdown(context.Background()); err != nil {
-				slog.Warn("http shutdown", "addr", addr, "error", err)
-			}
-		}()
+		servers = append(servers, srv)
 		return srv
 	}
 
-	startHTTPSServer := func(ctx context.Context, addr string, handler http.Handler, tlsConfig *tls.Config) *http.Server {
+	startHTTPSServer := func(addr string, handler http.Handler, tlsConfig *tls.Config) *http.Server {
 		server := &http.Server{
 			Addr:              addr,
 			Handler:           handler,
@@ -570,12 +494,7 @@ func main() {
 				os.Exit(1)
 			}
 		}()
-		go func() {
-			<-ctx.Done()
-			if err := server.Shutdown(context.Background()); err != nil {
-				slog.Warn("https shutdown", "addr", addr, "error", err)
-			}
-		}()
+		servers = append(servers, server)
 		return server
 	}
 
@@ -587,14 +506,16 @@ func main() {
 			addr = ":8080"
 		}
 		slog.Info("starting HTTP server (Cloudflare mode)", "addr", addr)
-		startHTTPServer(ctx, addr, handler)
+		startHTTPServer(addr, handler)
 		for _, aliasAddr := range uniqueStrings(currentSiteListens()) {
 			if aliasAddr == addr {
 				continue
 			}
 			slog.Info("starting HTTP port alias", "addr", aliasAddr)
-			startHTTPServer(ctx, aliasAddr, handler)
+			startHTTPServer(aliasAddr, handler)
 		}
+		stopReload := startReload()
+		defer stopReload()
 		<-ctx.Done()
 		slog.Info("shutting down...")
 	} else {
@@ -615,13 +536,14 @@ func main() {
 			GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
 				stateMu.RLock()
 				defer stateMu.RUnlock()
-				return &currentTLSCert, nil
+				cert := currentTLSCert
+				return &cert, nil
 			},
 			MinVersion: tls.VersionTLS12,
 		}
 
 		// Also listen on HTTP for cert/profile downloads.
-		go func() {
+		func() {
 			httpAddr := ":80"
 			if addr != ":443" {
 				_, port, _ := net.SplitHostPort(addr)
@@ -630,6 +552,9 @@ func main() {
 				} else {
 					httpAddr = ":8080"
 				}
+			}
+			if cfg.Server.HTTPListen != "" {
+				httpAddr = cfg.Server.HTTPListen
 			}
 			httpMux := http.NewServeMux()
 			httpMux.HandleFunc("GET /certs/rootCA.mobileconfig", func(w http.ResponseWriter, r *http.Request) {
@@ -657,18 +582,24 @@ func main() {
 				}
 			})
 			httpMux.HandleFunc("GET /onboarding", func(w http.ResponseWriter, r *http.Request) {
-				if currentSites().Resolve(r) == nil {
+				stateMu.RLock()
+				sites := siteRegistry
+				stateMu.RUnlock()
+				if sites.ResolveBootstrap(r) == nil {
 					http.NotFound(w, r)
 					return
 				}
-				data, _ := web.Static.ReadFile("onboarding.html")
+				data, _ := web.Static.ReadFile("trust.html")
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				if _, err := w.Write(data); err != nil {
+				if _, err := w.Write([]byte(strings.ReplaceAll(string(data), "{{HTTPS_ORIGIN}}", html.EscapeString(sites.ResolveBootstrap(r).PublicOrigin)))); err != nil {
 					slog.Warn("write onboarding page", "error", err)
 				}
 			})
 			httpMux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-				siteCfg := currentSites().Resolve(r)
+				stateMu.RLock()
+				sites := siteRegistry
+				stateMu.RUnlock()
+				siteCfg := sites.ResolveBootstrap(r)
 				if siteCfg == nil || siteCfg.PublicOrigin == "" {
 					http.NotFound(w, r)
 					return
@@ -676,19 +607,21 @@ func main() {
 				target := siteCfg.PublicOrigin + r.URL.RequestURI()
 				http.Redirect(w, r, target, http.StatusMovedPermanently)
 			})
-			startHTTPServer(ctx, httpAddr, withSecurityHeaders(httpMux, currentTrusted))
+			startHTTPServer(httpAddr, withSecurityHeaders(httpMux, currentTrusted))
 			slog.Info("starting HTTP server (cert downloads)", "addr", httpAddr)
 		}()
 
 		slog.Info("starting HTTPS server", "addr", addr, "origin", cfg.Server.PublicOrigin)
-		startHTTPSServer(ctx, addr, handler, tlsConfig)
+		startHTTPSServer(addr, handler, tlsConfig)
 		for _, aliasAddr := range uniqueStrings(currentSiteListens()) {
 			if aliasAddr == addr {
 				continue
 			}
 			slog.Info("starting HTTPS port alias", "addr", aliasAddr)
-			startHTTPSServer(ctx, aliasAddr, handler, tlsConfig)
+			startHTTPSServer(aliasAddr, handler, tlsConfig)
 		}
+		stopReload := startReload()
+		defer stopReload()
 		<-ctx.Done()
 		slog.Info("shutting down...")
 	}
@@ -702,7 +635,7 @@ func withSecurityHeaders(next http.Handler, trustedFn func() []*net.IPNet) http.
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
 		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
 		if isHTTPSRequest(r, trustedFn()) {
-			w.Header().Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}
 		next.ServeHTTP(w, r)
 	})
@@ -749,4 +682,54 @@ func uniqueStrings(values []string) []string {
 		out = append(out, v)
 	}
 	return out
+}
+
+func sameListeners(a, b *config.Config) bool {
+	listeners := func(c *config.Config) map[string]struct{} {
+		m := map[string]struct{}{}
+		for _, s := range c.Sites {
+			if s.Listen != "" {
+				m[strings.TrimSpace(s.Listen)] = struct{}{}
+			}
+		}
+		return m
+	}
+	x, y := listeners(a), listeners(b)
+	if len(x) != len(y) {
+		return false
+	}
+	for k := range x {
+		if _, ok := y[k]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// Host/IP overrides also define WebAuthn's origin, not only TLS SANs.
+func applyCLIOrigin(cfg *config.Config, hosts, ips []string) {
+	if len(cfg.Sites) != 0 {
+		return
+	}
+	host := ""
+	if len(hosts) > 0 {
+		host = hosts[0]
+	} else if len(ips) > 0 {
+		host = ips[0]
+	}
+	if host == "" {
+		return
+	}
+	cfg.Server.RPID = host
+	authority := host
+	if strings.Contains(host, ":") {
+		authority = "[" + host + "]"
+	}
+	if !cfg.Server.Cloudflare {
+		_, port, err := net.SplitHostPort(cfg.Server.Listen)
+		if err == nil && port != "443" {
+			authority = net.JoinHostPort(host, port)
+		}
+	}
+	cfg.Server.PublicOrigin = "https://" + authority
 }

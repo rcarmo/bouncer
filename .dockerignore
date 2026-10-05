@@ -1,0 +1,16 @@
+.git
+node_modules
+bouncer
+bouncer.json
+sessions.json
+*.sqlite*
+*.db
+*.pem
+*.key
+*.log
+.env*
+coverage.out
+tmp
+.tmp*
+
+artifacts
