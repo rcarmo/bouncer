@@ -22,7 +22,7 @@ bouncer/
 │   ├── proxy/              # Reverse proxy with X-Forwarded-* headers
 │   ├── session/            # File-backed session store with TTL + cleanup
 │   ├── site/               # Host + host:port site registry (multi-site routing)
-│   └── token/              # 6-digit enrollment token generation
+│   └── token/              # 12-digit enrollment token generation
 └── web/
     ├── embed.go            # embed.FS for static files
     ├── landing.html        # Unauthenticated landing page
@@ -163,7 +163,7 @@ static asset, terminal, and VNC URLs intact.
 Browser → HTTP/HTTPS → Bouncer
   1. GET /onboarding → serve onboarding page
   2. User installs .mobileconfig (local TLS only)
-  3. User enters one-time 6-digit token (issued on demand; skipped for local IPs)
+  3. User enters one-time 12-digit token (issued on demand; skipped for local IPs)
   4. POST /webauthn/register/options → server returns challenge
   5. Browser creates credential (navigator.credentials.create)
   6. POST /webauthn/register/verify → server verifies + saves user
@@ -237,7 +237,7 @@ Bouncer
 
 - **Session cookie**: httpOnly, Secure, SameSite=Lax. 7-day TTL (configurable).
 - **WebAuthn challenges**: stored in-memory, expire after 5 minutes.
-- **Enrollment token**: one-time 6-digit code issued on demand, logged (and optionally sent via Pushover), never exposed via API.
+- **Enrollment token**: one-time 12-digit code issued on demand, optionally sent via Pushover or retrieved by the trusted reset command, never exposed via API.
 - **Trusted proxies**: X-Forwarded-* headers stripped unless RemoteAddr matches CIDR list.
 - **File permissions**: bouncer.json and sessions.json written with mode 0600.
 

@@ -1,6 +1,7 @@
 <!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Bouncer – Install trust</title>
-<style>body{font:1rem system-ui;max-width:30rem;margin:4rem auto;padding:1rem}a{display:block;margin:1.5rem 0}</style></head>
-<body><h1>Install local trust</h1><p>Install the local CA on your device, then continue over HTTPS to create a passkey. Never enter an enrollment code on an HTTP page.</p>
-<a href="/certs/rootCA.mobileconfig">Install iOS/macOS profile</a><a href="/certs/rootCA.cer">Download CA certificate</a>
-<a id="continue" href="{{HTTPS_ORIGIN}}/onboarding">Continue to secure setup</a></body></html>
+<style>body{font:1rem system-ui;max-width:36rem;margin:3rem auto;padding:1rem}a{display:block;margin:1rem 0}code{overflow-wrap:anywhere}a[aria-disabled="true"]{color:#666}input{width:auto}</style></head>
+<body><h1>Install local trust</h1>{{TRUST_CONTENT}}
+<p>Never enter an enrollment code on an HTTP page.</p>
+<a id="continue" href="{{HTTPS_ORIGIN}}/onboarding">Continue to secure setup</a>
+<script type="module" src="/static/trust.js"></script></body></html>

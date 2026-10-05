@@ -1,6 +1,7 @@
 package notify
 
 import (
+	"container/list"
 	"context"
 	"encoding/json"
 	"errors"
@@ -43,15 +44,57 @@ type FallbackGeoProvider struct {
 	closeErr  error
 }
 
+// External lookups retain at most 4096 entries, including across providers.
+const geoCacheCapacity = 4096
+
 type geoCacheEntry struct {
+	key     string
 	info    *GeoInfo
 	expires time.Time
 }
-
-var geoCache = struct {
+type externalGeoCache struct {
 	mu      sync.Mutex
-	entries map[string]geoCacheEntry
-}{entries: make(map[string]geoCacheEntry)}
+	entries map[string]*list.Element
+	order   list.List // insertion order (FIFO)
+}
+
+var geoCache = externalGeoCache{entries: make(map[string]*list.Element)}
+
+func (c *externalGeoCache) evictExpired(now time.Time) {
+	for e := c.order.Front(); e != nil; {
+		next := e.Next()
+		entry := e.Value.(geoCacheEntry)
+		if !now.Before(entry.expires) {
+			delete(c.entries, entry.key)
+			c.order.Remove(e)
+		}
+		e = next
+	}
+}
+func (c *externalGeoCache) get(key string, now time.Time) *GeoInfo {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evictExpired(now)
+	if e := c.entries[key]; e != nil {
+		return e.Value.(geoCacheEntry).info
+	}
+	return nil
+}
+func (c *externalGeoCache) put(key string, info *GeoInfo, expires, now time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.evictExpired(now)
+	if e := c.entries[key]; e != nil {
+		c.order.Remove(e)
+		delete(c.entries, key)
+	}
+	if len(c.entries) >= geoCacheCapacity {
+		e := c.order.Front()
+		delete(c.entries, e.Value.(geoCacheEntry).key)
+		c.order.Remove(e)
+	}
+	c.entries[key] = c.order.PushBack(geoCacheEntry{key: key, info: info, expires: expires})
+}
 
 // LookupGeoIP performs a basic geolocation lookup for an IP.
 func LookupGeoIP(ctx context.Context, cfg config.GeoIPConfig, ip string) (*GeoInfo, error) {
@@ -60,16 +103,11 @@ func LookupGeoIP(ctx context.Context, cfg config.GeoIPConfig, ip string) (*GeoIn
 	}
 
 	ttl := time.Duration(cfg.CacheTTLSeconds) * time.Second
+	key := cfg.URL + "\x00" + ip
 	if ttl > 0 {
-		geoCache.mu.Lock()
-		if entry, ok := geoCache.entries[ip]; ok {
-			if time.Now().Before(entry.expires) {
-				geoCache.mu.Unlock()
-				return entry.info, nil
-			}
-			delete(geoCache.entries, ip)
+		if info := geoCache.get(key, time.Now()); info != nil {
+			return info, nil
 		}
-		geoCache.mu.Unlock()
 	}
 
 	url := fmt.Sprintf(cfg.URL, ip)
@@ -91,8 +129,12 @@ func LookupGeoIP(ctx context.Context, cfg config.GeoIPConfig, ip string) (*GeoIn
 		return nil, fmt.Errorf("geoip: status %d", resp.StatusCode)
 	}
 
+	body, err := readBounded(resp.Body, maxExternalJSONBytes)
+	if err != nil {
+		return nil, err
+	}
 	var payload map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&payload); err != nil {
+	if err := json.Unmarshal(body, &payload); err != nil {
 		return nil, err
 	}
 
@@ -114,9 +156,8 @@ func LookupGeoIP(ctx context.Context, cfg config.GeoIPConfig, ip string) (*GeoIn
 		info.IP = ip
 	}
 	if ttl > 0 {
-		geoCache.mu.Lock()
-		geoCache.entries[ip] = geoCacheEntry{info: info, expires: time.Now().Add(ttl)}
-		geoCache.mu.Unlock()
+		now := time.Now()
+		geoCache.put(key, info, now.Add(ttl), now)
 	}
 	return info, nil
 }

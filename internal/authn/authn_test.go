@@ -263,7 +263,7 @@ func TestLoginVerifyExpiredChallenge(t *testing.T) {
 func TestLogoutClearsCookie(t *testing.T) {
 	h, _, sess := setupTestHandler(t)
 
-	sessID, _ := sess.Create("default", "user-1")
+	sessID, _ := sess.Create("default", "user-1", "credential")
 
 	req := httptest.NewRequest("POST", "https://localhost/logout", nil)
 	req.Header.Set("Origin", "https://localhost")

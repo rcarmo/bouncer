@@ -27,6 +27,7 @@ func newRouter(cfg *config.Config, siteRegistry *site.Registry, authnHandler *au
 	mux.HandleFunc("POST /logout", func(w http.ResponseWriter, r *http.Request) { authnHandler.Logout(w, r) })
 
 	// UI routes.
+	mux.HandleFunc("GET /static/{script}", web.ServeScript)
 	mux.HandleFunc("GET /static/icon-256.png", func(w http.ResponseWriter, r *http.Request) {
 		data, err := web.Static.ReadFile("icon-256.png")
 		if err != nil {
@@ -62,6 +63,16 @@ func newRouter(cfg *config.Config, siteRegistry *site.Registry, authnHandler *au
 		}
 		data, _ := web.Static.ReadFile("onboarding.html")
 		html := string(data)
+		trust := ""
+		if !curCfg.Server.Cloudflare {
+			fingerprint, err := ca.FingerprintSHA256(curCfg)
+			if err != nil {
+				http.Error(w, "CA fingerprint unavailable", http.StatusInternalServerError)
+				return
+			}
+			trust = web.TrustContent(fingerprint)
+		}
+		html = strings.ReplaceAll(html, "{{TRUST_CONTENT}}", trust)
 		// Inject local bypass meta tag if applicable.
 		if authnHandler.IsLocalBypass(r) {
 			{
@@ -122,6 +133,10 @@ func newRouter(cfg *config.Config, siteRegistry *site.Registry, authnHandler *au
 			sess := sessStore.Get(cookie.Value)
 			if sessionAuthorized(curCfg, sess, siteCfg.ID) {
 				if rp := proxyBySite[siteCfg.ID]; rp != nil {
+					if strings.EqualFold(strings.TrimSpace(r.Header.Get("Upgrade")), "websocket") && (len(r.Header.Values("Origin")) != 1 || !authn.OriginMatches(r.Header.Get("Origin"), siteCfg.PublicOrigin)) {
+						http.Error(w, "invalid websocket origin", http.StatusForbidden)
+						return
+					}
 					// Backend applications own their CSP and permissions policy.
 					for _, name := range []string{"Content-Security-Policy", "Permissions-Policy", "X-Frame-Options", "Referrer-Policy", "Cache-Control"} {
 						w.Header().Del(name)
@@ -167,5 +182,13 @@ func sessionAuthorized(cfg *config.Config, sess *session.Session, siteID string)
 		return false
 	}
 	user := cfg.FindUserByID(siteID, sess.UserID)
-	return user != nil && len(user.Credentials) > 0
+	if user == nil || sess.CredentialID == "" {
+		return false
+	}
+	for _, cred := range user.Credentials {
+		if cred.ID == sess.CredentialID {
+			return true
+		}
+	}
+	return false
 }

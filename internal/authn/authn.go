@@ -55,7 +55,10 @@ type Handler struct {
 	rateWindow    time.Duration
 	blockDuration time.Duration
 
-	stopCleanup chan struct{}
+	stopCleanup   chan struct{}
+	notifications chan struct{}
+	globalCount   int
+	globalReset   time.Time
 }
 
 // challengeEntry stores a challenge with its expiry time.
@@ -77,8 +80,11 @@ type rateEntry struct {
 }
 
 const (
-	maxBodyBytes = 1 << 20 // 1 MiB
-	maxNameLen   = 128
+	maxBodyBytes      = 1 << 20 // 1 MiB
+	maxNameLen        = 128
+	maxChallenges     = 1024
+	maxRateEntries    = 4096
+	maxGlobalRequests = 500
 )
 
 // New creates a new WebAuthn handler.
@@ -114,6 +120,7 @@ func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *s
 		rateWindow:    time.Minute,
 		blockDuration: 5 * time.Minute,
 		stopCleanup:   make(chan struct{}),
+		notifications: make(chan struct{}, 32),
 	}
 	// Start challenge cleanup goroutine.
 	go h.cleanupChallenges()
@@ -239,7 +246,7 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	go h.notifyEnrollmentAttempt(enrollmentMeta{
+	attempt := enrollmentMeta{
 		Token:         currentToken,
 		TokenProvided: strings.TrimSpace(req.Token) != "",
 		TokenValid:    validToken,
@@ -252,7 +259,8 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		DisplayName:   req.DisplayName,
 		Name:          req.Name,
 		GeoHeaders:    h.geoHeadersFromRequest(r),
-	})
+	}
+	h.runNotification(func() { h.notifyEnrollmentAttempt(attempt) })
 	if !validToken {
 		if !bypass && h.cfg.OnboardingSnapshot().OneTimeToken && currentToken == "" {
 			tokenValue, err := h.issueToken()
@@ -304,6 +312,11 @@ func (h *Handler) RegisterOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Lock()
+	if len(h.challenges) >= maxChallenges {
+		h.mu.Unlock()
+		writeJSONError(w, http.StatusServiceUnavailable, "too many challenges")
+		return
+	}
 	h.challenges[challengeID] = &challengeEntry{
 		data:        sessionData,
 		expires:     time.Now().Add(5 * time.Minute),
@@ -446,7 +459,7 @@ func (h *Handler) RegisterVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create session.
-	sessID, err := h.sess.Create(entry.siteID, entry.userID)
+	sessID, err := h.sess.Create(entry.siteID, entry.userID, newUser.Credentials[0].ID)
 	if err != nil {
 		slog.Error("webauthn: create session", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
@@ -493,6 +506,11 @@ func (h *Handler) LoginOptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	h.mu.Lock()
+	if len(h.challenges) >= maxChallenges {
+		h.mu.Unlock()
+		writeJSONError(w, http.StatusServiceUnavailable, "too many challenges")
+		return
+	}
 	h.challenges[challengeID] = &challengeEntry{
 		data:    sessionData,
 		expires: time.Now().Add(5 * time.Minute),
@@ -608,7 +626,7 @@ func (h *Handler) LoginVerify(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sessID, err := h.sess.Create(entry.siteID, user.ID)
+	sessID, err := h.sess.Create(entry.siteID, user.ID, credIDStr)
 	if err != nil {
 		slog.Error("webauthn: create session", "error", err)
 		writeJSONError(w, http.StatusInternalServerError, "internal error")
@@ -755,17 +773,18 @@ func (h *Handler) announceEnrollmentToken(r *http.Request, token string) {
 		return
 	}
 	ip := h.clientIP(r)
-	// #nosec G706 -- structured fields; IP is parsed and token is generated locally or admin-configured.
-	slog.Info("enrollment token issued", "token", token, "ip", ip)
-	fmt.Printf("\n  Enrollment Token: %s\n\n", token)
-	go h.notifyEnrollmentToken(enrollmentTokenMeta{
-		Token:      token,
-		IP:         ip,
-		UserAgent:  r.UserAgent(),
-		AcceptLang: r.Header.Get("Accept-Language"),
-		Origin:     r.Header.Get("Origin"),
-		Host:       r.Host,
-		GeoHeaders: h.geoHeadersFromRequest(r),
+	// #nosec G706 -- structured logging of parsed net.IP.String, never raw headers.
+	slog.Info("enrollment token issued", "ip", ip)
+	h.runNotification(func() {
+		h.notifyEnrollmentToken(enrollmentTokenMeta{
+			Token:      token,
+			IP:         ip,
+			UserAgent:  r.UserAgent(),
+			AcceptLang: r.Header.Get("Accept-Language"),
+			Origin:     r.Header.Get("Origin"),
+			Host:       r.Host,
+			GeoHeaders: h.geoHeadersFromRequest(r),
+		})
 	})
 }
 
@@ -852,11 +871,12 @@ func (h *Handler) issueToken() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if err := h.cfg.SetEnrollmentToken(value); err != nil {
+	issued, err := h.cfg.EnsureEnrollmentToken(value)
+	if err != nil {
 		return "", err
 	}
 	h.tokenAnnounced = false
-	return value, nil
+	return issued, nil
 }
 
 func (h *Handler) maybeAnnounceToken(r *http.Request, token string) {
@@ -988,13 +1008,28 @@ func originMatches(origin string, siteOrigin string) bool {
 func (h *Handler) allowRequest(r *http.Request) bool {
 	ip := h.clientIP(r)
 	if ip == "" {
-		return true
+		peer := localip.ExtractIP(r.RemoteAddr)
+		if peer == nil {
+			return false
+		}
+		ip = peer.String()
 	}
 	now := time.Now()
 	h.rateMu.Lock()
 	defer h.rateMu.Unlock()
+	if now.After(h.globalReset) {
+		h.globalReset = now.Add(h.rateWindow)
+		h.globalCount = 0
+	}
+	if h.globalCount >= maxGlobalRequests {
+		return false
+	}
+	h.globalCount++
 	entry := h.rate[ip]
 	if entry == nil {
+		if len(h.rate) >= maxRateEntries {
+			return false
+		}
 		entry = &rateEntry{reset: now.Add(h.rateWindow)}
 		h.rate[ip] = entry
 	}
@@ -1110,3 +1145,15 @@ func (h *Handler) cleanupChallenges() {
 		}
 	}
 }
+
+// runNotification drops excess work rather than creating unbounded goroutines.
+func (h *Handler) runNotification(fn func()) {
+	select {
+	case h.notifications <- struct{}{}:
+		go func() { defer func() { <-h.notifications }(); fn() }()
+	default:
+	}
+}
+
+// OriginMatches compares a single browser origin with a configured public origin.
+func OriginMatches(origin, publicOrigin string) bool { return originMatches(origin, publicOrigin) }

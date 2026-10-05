@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -80,7 +81,7 @@ func routerFixture(t *testing.T, backend string) (*config.Config, *session.Store
 		t.Fatal(e)
 	}
 	t.Cleanup(store.Stop)
-	sess, e := store.Create("default", "user")
+	sess, e := store.Create("default", "user", "credential")
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -198,5 +199,51 @@ func TestCLIHostSetsWebAuthnOrigin(t *testing.T) {
 	applyCLIOrigin(c, []string{"public.example"}, nil)
 	if c.Server.PublicOrigin != "https://public.example" {
 		t.Fatal("tunnel origin contains internal port")
+	}
+}
+
+func TestCredentialRevocationAndLegacySessions(t *testing.T) {
+	backend := httptest.NewServer(streamBackend("test"))
+	defer backend.Close()
+	cfg, store, id, _ := routerFixture(t, backend.URL)
+	sess := store.Get(id)
+	if !sessionAuthorized(cfg, sess, "default") {
+		t.Fatal("credential-bound session denied")
+	}
+	cfg.Users[0].Credentials = []config.Credential{{ID: "other"}}
+	if sessionAuthorized(cfg, sess, "default") {
+		t.Fatal("removed credential still authorised")
+	}
+	sess.CredentialID = ""
+	if sessionAuthorized(cfg, sess, "default") {
+		t.Fatal("legacy unbound session authorised")
+	}
+}
+func TestWebsocketOriginRequired(t *testing.T) {
+	backend := httptest.NewServer(streamBackend("test"))
+	defer backend.Close()
+	cfg, _, id, handler := routerFixture(t, backend.URL)
+	for _, origin := range []string{"", "https://sibling.bouncer.test", "https://bouncer.test.attacker.example", "https://bouncer.test/path", "null"} {
+		req := httptest.NewRequest("GET", "https://bouncer.test/ws", nil)
+		req.Header.Set("Upgrade", "websocket")
+		req.Header.Set("Connection", "Upgrade")
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		req.AddCookie(&http.Cookie{Name: cfg.Session.CookieName, Value: id})
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("origin %q accepted: %d", origin, w.Code)
+		}
+	}
+}
+func TestStrictScriptCSP(t *testing.T) {
+	h := withSecurityHeaders(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }), func() []*net.IPNet { return nil })
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, httptest.NewRequest("GET", "https://bouncer.test/login", nil))
+	csp := w.Header().Get("Content-Security-Policy")
+	if !strings.Contains(csp, "script-src 'self';") || strings.Contains(csp, "script-src 'self' 'unsafe-inline'") {
+		t.Fatal(csp)
 	}
 }

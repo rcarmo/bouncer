@@ -146,3 +146,14 @@ bench: ## Run benchmarks with B/op, allocs/op and allocation profiles
 .PHONY: clean-profiles
 clean-profiles: ## Explicitly delete retained local allocation evidence
 	rm -rf -- "$(PROFILE_ROOT)"
+
+.PHONY: clean-build-cache
+clean-build-cache: ## Remove rebuildable Go compilation cache, preserving test evidence
+	go clean -cache
+
+CONTAINER_ENGINE ?= docker
+CONTAINER_IMAGE ?= bouncer:security-local
+.PHONY: test-container
+# Test-only image: production Docker builds leave GO_BUILD_TAGS empty.
+test-container: ## Profile non-root container startup, low ports and writable state
+	CONTAINER_ENGINE="$(CONTAINER_ENGINE)" CONTAINER_IMAGE="$(CONTAINER_IMAGE)" PROFILE_ROOT="$(PROFILE_ROOT)" bash scripts/container-smoke.sh

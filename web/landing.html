@@ -24,19 +24,10 @@
   <div class="caption">No unwanted guests, bud.</div>
   <h1>Bouncer</h1>
   <p id="subtitle">Sign in or create a passkey to continue.</p>
-  <button id="onboard-btn" onclick="window.location.href='/onboarding'">Create Passkey</button>
-  <button class="secondary" onclick="window.location.href='/login'">Sign in with Passkey</button>
+  <button id="onboard-btn" data-navigate="/onboarding">Create Passkey</button>
+  <button class="secondary" data-navigate="/login">Sign in with Passkey</button>
 </div>
 
-<script type="module">
-const meta = document.querySelector('meta[name="onboarding"]');
-const enabled = meta && meta.content === 'true';
-if (!enabled) {
-  const btn = document.getElementById('onboard-btn');
-  if (btn) btn.classList.add('hidden');
-  const subtitle = document.getElementById('subtitle');
-  if (subtitle) subtitle.textContent = 'Sign in with your passkey to continue.';
-}
-</script>
+<script type="module" src="/static/landing.js"></script>
 </body>
 </html>

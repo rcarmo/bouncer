@@ -50,12 +50,12 @@ Key components:
 
 ### 2) Onboarding Mode (`--onboarding`)
 - Registration enabled.
-- Enrollment requires a **one‑time six‑digit token**; local IP ranges (RFC1918 + loopback) bypass the token when `onboarding.localBypass` is `true` (default).
+- Enrollment requires a **one‑time twelve‑digit token**; local IP ranges (RFC1918 + loopback) bypass the token when `onboarding.localBypass` is `true` (default).
 - Token is **issued on demand** on the first registration attempt, **printed to logs** and optionally sent via Pushover; it is consumed after use.
 - Optional **Pushover alerts** can be sent on enrollment attempts (IP, UA, basic geo lookup).
 - Users without a valid session see **onboarding UI**:
   - If TLS is not trusted (local CA use‑case): prompt to install the profile.
-  - Then prompt to **enter the one‑time 6‑digit token** and **create a passkey**.
+  - Then prompt to **enter the one‑time 12‑digit token** and **create a passkey**.
 - After passkey creation, user is redirected to the backend.
 
 ### 3) Cloudflare Tunnel Mode (`--cloudflare`)
@@ -196,6 +196,8 @@ Flags:
   --onboarding            Enable onboarding mode (allow registration)
   --cloudflare            Enable Cloudflare Tunnel mode (no local TLS/profile flow)
   --dbip-update           Download/update DB-IP Lite database and exit
+  --fingerprint-CA        Print existing CA certificate SHA256 through a trusted console
+  --reset-enrollment      Reset enrollment lockout, print a fresh code and exit
   --log-level <level>     info|debug|warn|error
 
 Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in single-site mode. When `sites` is configured, these flags are ignored.
@@ -320,7 +322,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - `session.ttlDays`: sessions expire after this many days (default 7); user must re‑authenticate with passkey.
 - `session.file`: path to the sessions JSON file (default `sessions.json`, relative to config dir).
 - `onboarding.oneTimeToken`: if `true`, tokens are issued on demand and consumed after a successful registration options request (default `true`).
-- `onboarding.rotateTokenOnStart`: if `true`, a new 6‑digit token is generated on each startup (old token discarded). Ignored when `oneTimeToken` is `true`.
+- `onboarding.rotateTokenOnStart`: if `true`, a new 12‑digit token is generated on each startup (old token discarded). Ignored when `oneTimeToken` is `true`.
 - `onboarding.localBypass`: if `true`, requests from RFC1918 + loopback IPs skip the token requirement.
 - `onboarding.geoip.preferCloudflareHeaders`: if `true`, Cloudflare geolocation headers are used first (from trusted proxies), falling back to DB-IP Lite or an optional external geoip URL if configured.
 - `onboarding.geoip.dbip.enabled`: enable the local DB-IP Lite SQLite database provider.
@@ -339,8 +341,8 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 
 ### Registration (Onboarding Mode only)
 1. User visits `/onboarding`.
-2. If required, user installs the trust profile/cert.
-3. User enters the **one‑time six‑digit enrollment token** (issued on demand).
+2. If required, user verifies the certificate SHA256 through an independent trusted channel before installing the trust profile/cert.
+3. User enters the **one‑time twelve‑digit enrollment token** (issued on demand).
    - If `onboarding.localBypass` is `true` and request is from RFC1918/loopback, token is not required.
 4. Client calls `POST /webauthn/register/options` (token included).
 5. Server returns `PublicKeyCredentialCreationOptions`.
@@ -487,7 +489,7 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - Provide clear buttons/inputs:
   - “Install iOS/macOS profile”
   - “Download macOS cert (optional)”
-  - **Enrollment token input (6 digits)**
+  - **Enrollment token input (12 digits)**
   - “Create passkey”
   - “Sign in with passkey”
 - If `onboarding.localBypass` is `true` and request is from a local IP, token input is hidden.
@@ -506,8 +508,8 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - WebAuthn responses use `Cache-Control: no-store`.
 - HTTP servers enforce sane timeouts and max header size to mitigate slowloris-style attacks.
 - Protect `bouncer.json` and `sessions.json` with restrictive file permissions (0600).
-- Enrollment token is **6 digits**, generated via `crypto/rand`.
-- Token is **issued on demand**, logged (and optionally sent via Pushover), and never exposed via API.
+- Enrollment token is **12 digits**, generated via `crypto/rand`.
+- Token is **issued on demand**, optionally sent via Pushover or retrieved by the trusted reset command, and never exposed via API.
 - `onboarding.localBypass`: when enabled, only RFC1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) + loopback (`127.0.0.0/8`, `::1`) skip the token.
 - `trustedProxies`: `X-Forwarded-*` headers are stripped unless `RemoteAddr` matches a trusted proxy CIDR. Prevents origin/proto spoofing.
 
@@ -517,20 +519,20 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 - **`bouncer.json`**: config + user DB. Loaded at startup; written back on credential changes. Atomic writes (temp + fsync + rename).
 - **`sessions.json`**: session records. Separate file so session churn doesn't rewrite the config. Atomic writes. Pruned of expired entries on startup and periodically.
 - CA key/cert PEM persisted in `bouncer.json` so trust survives restarts.
-- Enrollment token persisted in `bouncer.json` when issued; cleared after use when `oneTimeToken` is `true`. `rotateTokenOnStart` only applies when `oneTimeToken` is `false`.
+- Enrollment token persisted in `bouncer.json` when issued; cleared after use when `oneTimeToken` is `true`. `rotateTokenOnStart` is legacy metadata; startup never resets or replaces a live code or clears lockout. Use `--reset-enrollment` for deliberate rotation.
 
 ---
 
 ## Implementation Notes (Go)
 - HTTP server with `net/http`.
-- Reverse proxy with `httputil.NewSingleHostReverseProxy`.
+- Reverse proxy with `httputil.ReverseProxy` and `Rewrite`.
 - WebAuthn using `github.com/go-webauthn/webauthn`.
 - Static UI (vanilla JS) embedded via `embed.FS`.
 - JSON persistence using `encoding/json` + atomic file writes.
 - CA/cert generation using `crypto/x509`, `crypto/ecdsa`, `crypto/rand`, and `encoding/pem`.
-- Token generation: 6‑digit via `crypto/rand` (uniform 000000–999999).
+- Token generation: 12‑digit via `crypto/rand` (uniform 000000000000–999999999999).
 - Mobileconfig generation: minimal XML template with UUIDs generated via `crypto/rand`.
-- Local IP detection: parse `RemoteAddr` (or `CF-Connecting-IP`/`True-Client-IP`/`X-Forwarded-For` when sender is trusted) and match against RFC1918/loopback CIDRs.
+- Local IP detection: parse `RemoteAddr` (or `X-Forwarded-For` when sender is trusted) and match against RFC1918/loopback CIDRs.
 - Session file: loaded into in-memory map on startup; flushed to disk on changes + periodic sync.
 - Token validation: checked in `POST /webauthn/register/options` before issuing a challenge.
 
@@ -545,4 +547,4 @@ Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in sing
 
 ## October 2026 updates
 
-See [the audit](docs/AUDIT-2026-10.md) for fixes, verification and limits. One-time enrollment stores `tokenExpiresAt` and `tokenAttempts` (10 minutes, 10 incorrect non-empty guesses). Credentials store `backupEligible` and `backupState`. Optional `server.httpListen` selects the restart-only local HTTP bootstrap listener. Session settings and all listener addresses require restart. Test runs must use the allocation-profiling Make targets defined in [AGENTS.md](AGENTS.md).
+See [the audit](docs/AUDIT-2026-10.md) for fixes, verification and limits. One-time enrollment stores `tokenExpiresAt` and `tokenAttempts` (10 minutes, 10 incorrect guesses (including empty submissions)). Credentials store `backupEligible` and `backupState`. Optional `server.httpListen` selects the restart-only local HTTP bootstrap listener. Session settings and all listener addresses require restart. Test runs must use the allocation-profiling Make targets defined in [AGENTS.md](AGENTS.md).

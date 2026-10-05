@@ -5,6 +5,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -12,6 +13,7 @@ import (
 	"fmt"
 	"math/big"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/rcarmo/bouncer/internal/config"
@@ -291,4 +293,26 @@ func validatedCA(kp *config.KeyPair) (*x509.Certificate, *ecdsa.PrivateKey, erro
 		return nil, nil, fmt.Errorf("ca: invalid root signature: %w", err)
 	}
 	return cert, key, nil
+}
+
+// FingerprintSHA256 hashes the certificate DER (not PEM or the public key).
+// Publish this only through a trusted console/channel for bootstrap verification.
+func FingerprintSHA256(cfg *config.Config) (string, error) {
+	der, err := CACertDER(cfg)
+	if err != nil {
+		return "", err
+	}
+	cert, err := x509.ParseCertificate(der)
+	if err != nil {
+		return "", fmt.Errorf("ca: invalid certificate: %w", err)
+	}
+	if !cert.IsCA {
+		return "", fmt.Errorf("ca: certificate is not a CA")
+	}
+	sum := sha256.Sum256(cert.Raw)
+	parts := make([]string, len(sum))
+	for i, b := range sum {
+		parts[i] = fmt.Sprintf("%02X", b)
+	}
+	return strings.Join(parts, ":"), nil
 }

@@ -23,7 +23,7 @@ const bootstrap=Bun.serve({hostname:'127.0.0.1',port:0,fetch(){return new Respon
 const bootstrapPort=bootstrap.port;bootstrap.stop(true);
 const origin=`${tls ? "https" : "http"}://localhost:${port}`;
 const cfgPath=join(dir,'bouncer.json');
-await Bun.write(cfgPath,JSON.stringify({server:{listen:`127.0.0.1:${port}`,cloudflare:!tls,httpListen:`127.0.0.1:${bootstrapPort}`,publicOrigin:origin,rpID:'localhost',hostnames:['localhost'],backend:`http://127.0.0.1:${backend.port}`},onboarding:{enabled:true,localBypass:false,oneTimeToken:true,token:'123456',geoip:{enabled:false}}}));
+await Bun.write(cfgPath,JSON.stringify({server:{listen:`127.0.0.1:${port}`,cloudflare:!tls,httpListen:`127.0.0.1:${bootstrapPort}`,publicOrigin:origin,rpID:'localhost',hostnames:['localhost'],backend:`http://127.0.0.1:${backend.port}`},onboarding:{enabled:true,localBypass:false,oneTimeToken:true,token:'123456789012',geoip:{enabled:false}}}));
 let process: ReturnType<typeof Bun.spawn>|undefined;
 let logs = '';
 let logReaders: Promise<void>[] = [];
@@ -61,9 +61,10 @@ try {
  const cdp=await context.newCDPSession(page);await cdp.send('WebAuthn.enable');
  await cdp.send('WebAuthn.addVirtualAuthenticator',{options:{protocol:'ctap2',transport:'internal',hasResidentKey:true,hasUserVerification:true,isUserVerified:true,automaticPresenceSimulation:true,defaultBackupEligibility:true,defaultBackupState:true}});
  const errors:string[]=[];page.on('pageerror',e=>errors.push(e.message));
- if(tls){await page.goto('http://localhost:'+bootstrapPort+'/onboarding');assert.equal(await page.locator('#continue').getAttribute('href'),origin+'/onboarding');await page.locator('#continue').click();}else{await page.goto(origin+'/onboarding');}
+ if(tls){const bootstrapResponse=await page.goto('http://localhost:'+bootstrapPort+'/onboarding');assert(bootstrapResponse);assert(bootstrapResponse.headers()['content-security-policy'].includes("script-src 'self';"));const download=page.locator('[data-trust-download="/certs/rootCA.cer"]');assert.equal(await download.getAttribute('href'),null);assert.match(await page.locator('.fingerprint').textContent()||'',/^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/);await page.locator('#trust-verified').check();await page.waitForFunction(()=>document.querySelector('[data-trust-download="/certs/rootCA.cer"]')?.getAttribute('href')==='/certs/rootCA.cer');assert.equal(await page.locator('#continue').getAttribute('href'),origin+'/onboarding');await page.locator('#continue').click();}else{await page.goto(origin+'/onboarding');}
+ const uiResponse=await page.request.get(origin+'/onboarding');assert(uiResponse.headers()['content-security-policy'].includes("script-src 'self';"));
  assert(await page.locator('#token-group').isVisible(),'enrollment code UI hidden');
- for(let i=0;i<6;i++) await page.locator('.otp-input').nth(i).fill('123456'[i]);
+ for(let i=0;i<12;i++) await page.locator('.otp-input').nth(i).fill('123456789012'[i]);
  await page.locator('#name-input').fill('Browser smoke');
  await page.locator('#register-btn').click();
  await page.waitForURL(origin+'/',{timeout:15000});

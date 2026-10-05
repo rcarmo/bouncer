@@ -1,0 +1,9 @@
+<p>Before installing trust, obtain the CA SHA256 fingerprint from the administrator through an independent trusted channel (for example, a known phone number or trusted server console). Ask them to run <code>bouncer --config bouncer.json --fingerprint-CA</code>.</p>
+<p><strong>This HTTP page and its fingerprint are unauthenticated and can be replaced by an attacker. They do not authenticate the CA.</strong></p>
+<p>Expected certificate SHA256 (compare every byte):</p><code class="fingerprint">{{CA_FINGERPRINT}}</code>
+<p>Download the certificate after comparison, then compare its SHA256 certificate fingerprint in your certificate viewer before installing. Alternatively run <code>openssl x509 -inform DER -in bouncer-ca.cer -noout -fingerprint -sha256</code>. Stop if anything differs.</p>
+<p>The iOS/macOS profile is unsigned and installs a root CA. Trusting it grants broad authority to authenticate TLS sites, not just Bouncer. Only install it if you trust its administrator. Inspect the embedded certificate fingerprint before approving the profile, and enable root trust only after verification.</p>
+<label><input id="trust-verified" type="checkbox"> I compared the fingerprint through an independent trusted channel and understand root CA trust.</label>
+<p><a data-trust-download="/certs/rootCA.mobileconfig" aria-disabled="true">Download iOS/macOS profile</a></p>
+<p><a data-trust-download="/certs/rootCA.cer" aria-disabled="true">Download CA certificate</a></p>
+<noscript>Downloads require JavaScript for the verification acknowledgement. After independent verification, the administrator can provide the certificate directly.</noscript>

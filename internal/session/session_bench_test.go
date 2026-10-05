@@ -13,7 +13,7 @@ func BenchmarkSessionGet(b *testing.B) {
 		b.Fatal(err)
 	}
 	defer store.Stop()
-	id, err := store.Create("default", "user")
+	id, err := store.Create("default", "user", "credential")
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -35,7 +35,7 @@ func BenchmarkSessionCreateDelete(b *testing.B) {
 	b.ReportAllocs()
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
-		id, err := store.Create("default", "user")
+		id, err := store.Create("default", "user", "credential")
 		if err != nil {
 			b.Fatal(err)
 		}

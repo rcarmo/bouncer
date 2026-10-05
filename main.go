@@ -57,15 +57,17 @@ func (s *stringSlice) Set(v string) error {
 func main() {
 	defer finishAllocationProfile()
 	var (
-		configPath string
-		listen     string
-		backend    string
-		onboarding bool
-		cloudflare bool
-		logLevel   string
-		hostnames  stringSlice
-		ips        stringSlice
-		dbipUpdate bool
+		configPath      string
+		listen          string
+		backend         string
+		onboarding      bool
+		cloudflare      bool
+		logLevel        string
+		hostnames       stringSlice
+		ips             stringSlice
+		dbipUpdate      bool
+		fingerprintCA   bool
+		resetEnrollment bool
 	)
 
 	flag.StringVar(&configPath, "config", "bouncer.json", "Path to JSON config")
@@ -77,6 +79,8 @@ func main() {
 	flag.StringVar(&logLevel, "log-level", "info", "Log level: debug|info|warn|error")
 	flag.Var(&hostnames, "hostname", "DNS name for TLS SANs (may be repeated)")
 	flag.Var(&ips, "ip", "IP for TLS SANs (may be repeated)")
+	flag.BoolVar(&fingerprintCA, "fingerprint-CA", false, "Print existing CA certificate SHA256 fingerprint through a trusted console and exit")
+	flag.BoolVar(&resetEnrollment, "reset-enrollment", false, "Reset enrollment lockout, print a new code through a trusted console and exit")
 	flag.Parse()
 
 	// Logging.
@@ -88,6 +92,31 @@ func main() {
 	if err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
+	}
+
+	if resetEnrollment {
+		code, err := token.Generate()
+		if err != nil {
+			slog.Error("generate enrollment code", "error", err)
+			os.Exit(1)
+		}
+		if err := cfg.SetEnrollmentToken(code); err != nil {
+			slog.Error("reset enrollment", "error", err)
+			os.Exit(1)
+		}
+		fmt.Println("Enrollment code:", code)
+		return
+	}
+
+	// Read-only: this command never generates or replaces a trust root.
+	if fingerprintCA {
+		fingerprint, err := ca.FingerprintSHA256(cfg)
+		if err != nil {
+			slog.Error("CA fingerprint unavailable", "error", err)
+			os.Exit(1)
+		}
+		fmt.Println("CA certificate SHA256:", fingerprint)
+		return
 	}
 
 	if dbipUpdate {
@@ -141,20 +170,19 @@ func main() {
 			slog.Info("=== ONBOARDING MODE ACTIVE ===")
 			slog.Info("enrollment tokens are one-time and issued on demand")
 		} else {
-			if cfg.Onboarding.RotateTokenOnStart || cfg.Onboarding.Token == "" {
+			if !cfg.Onboarding.TokenLocked && (cfg.Onboarding.RotateTokenOnStart || cfg.Onboarding.Token == "") {
 				t, err := token.Generate()
 				if err != nil {
 					slog.Error("failed to generate token", "error", err)
 					os.Exit(1)
 				}
-				if err := cfg.SetEnrollmentToken(t); err != nil {
+				if _, err := cfg.EnsureEnrollmentToken(t); err != nil {
 					slog.Error("save enrollment token", "error", err)
 					os.Exit(1)
 				}
 			}
 			slog.Info("=== ONBOARDING MODE ACTIVE ===")
-			slog.Info("enrollment token", "token", cfg.Onboarding.Token)
-			fmt.Printf("\n  Enrollment Token: %s\n\n", cfg.Onboarding.Token)
+			slog.Info("enrollment code configured; retrieve through trusted --reset-enrollment command or Pushover")
 		}
 	}
 
@@ -187,6 +215,13 @@ func main() {
 			slog.Error("failed to ensure CA", "error", err)
 			os.Exit(1)
 		}
+		fingerprint, err := ca.FingerprintSHA256(cfg)
+		if err != nil {
+			slog.Error("CA fingerprint unavailable", "error", err)
+			os.Exit(1)
+		}
+		slog.Info("CA certificate SHA256; share through an independent trusted channel before installing trust", "fingerprint", fingerprint)
+		fmt.Printf("\n  CA certificate SHA256: %s\n  Compare through an independent trusted channel before installing root trust.\n\n", fingerprint)
 		if err := ca.EnsureServerCert(cfg); err != nil {
 			slog.Error("failed to ensure server cert", "error", err)
 			os.Exit(1)
@@ -557,6 +592,7 @@ func main() {
 				httpAddr = cfg.Server.HTTPListen
 			}
 			httpMux := http.NewServeMux()
+			httpMux.HandleFunc("GET /static/{script}", web.ServeScript)
 			httpMux.HandleFunc("GET /certs/rootCA.mobileconfig", func(w http.ResponseWriter, r *http.Request) {
 				data, err := ca.GenerateMobileconfig(currentConfig())
 				if err != nil {
@@ -590,8 +626,15 @@ func main() {
 					return
 				}
 				data, _ := web.Static.ReadFile("trust.html")
+				fingerprint, err := ca.FingerprintSHA256(currentConfig())
+				if err != nil {
+					http.Error(w, "CA fingerprint unavailable", http.StatusInternalServerError)
+					return
+				}
+				page := strings.ReplaceAll(string(data), "{{TRUST_CONTENT}}", web.TrustContent(fingerprint))
+				w.Header().Set("Cache-Control", "no-store")
 				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				if _, err := w.Write([]byte(strings.ReplaceAll(string(data), "{{HTTPS_ORIGIN}}", html.EscapeString(sites.ResolveBootstrap(r).PublicOrigin)))); err != nil {
+				if _, err := w.Write([]byte(strings.ReplaceAll(page, "{{HTTPS_ORIGIN}}", html.EscapeString(sites.ResolveBootstrap(r).PublicOrigin)))); err != nil {
 					slog.Warn("write onboarding page", "error", err)
 				}
 			})
@@ -633,7 +676,7 @@ func withSecurityHeaders(next http.Handler, trustedFn func() []*net.IPNet) http.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 		w.Header().Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()")
-		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:")
 		if isHTTPSRequest(r, trustedFn()) {
 			w.Header().Set("Strict-Transport-Security", "max-age=31536000")
 		}

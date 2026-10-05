@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -220,5 +221,85 @@ func TestSignCounterNeverRegresses(t *testing.T) {
 	}
 	if disk.FindUserByID("default", "u").Credentials[0].SignCount != 12 {
 		t.Fatal("persisted counter regressed")
+	}
+}
+
+func TestEnrollmentLockoutCannotAutoReset(t *testing.T) {
+	for _, oneTime := range []bool{true, false} {
+		t.Run(fmt.Sprint(oneTime), func(t *testing.T) {
+			c := regressionConfig(t)
+			c.Onboarding.OneTimeToken = oneTime
+			if err := c.SetEnrollmentToken("123456789012"); err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < EnrollmentTokenMaxAttempts; i++ {
+				if ok, _, err := c.CheckEnrollmentToken("wrong", true); ok || err != nil {
+					t.Fatal(ok, err)
+				}
+			}
+			disk, err := Load(c.Path())
+			if err != nil {
+				t.Fatal(err)
+			}
+			for i := 0; i < 20; i++ {
+				if code, err := disk.EnsureEnrollmentToken("999999999999"); code != "" || err != nil {
+					t.Fatal("automatic lockout reset", code, err)
+				}
+			}
+			if ok, _, _ := disk.CheckEnrollmentToken("123456789012", true); ok {
+				t.Fatal("locked code accepted")
+			}
+			if err := disk.SetEnrollmentToken("999999999999"); err != nil {
+				t.Fatal(err)
+			}
+			if ok, _, err := disk.CheckEnrollmentToken("999999999999", true); !ok || err != nil {
+				t.Fatal("operator reset failed", err)
+			}
+		})
+	}
+}
+func TestEnrollmentBudgetAcrossExpiredGenerations(t *testing.T) {
+	c := regressionConfig(t)
+	if err := c.SetEnrollmentToken("123456789012"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 100; i++ {
+		if ok, _, err := c.CheckEnrollmentToken("wrong", true); ok || err != nil {
+			t.Fatal(ok, err)
+		}
+		c.Onboarding.TokenExpiresAt = time.Now().Add(-time.Minute)
+		code, err := c.EnsureEnrollmentToken("123456789012")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if i < 99 && code == "" {
+			t.Fatalf("premature lock at %d", i)
+		}
+	}
+	if code, _ := c.EnsureEnrollmentToken("999999999999"); code != "" {
+		t.Fatal("global budget reset")
+	}
+	disk, err := Load(c.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !disk.Onboarding.TokenLocked || disk.Onboarding.TokenFailures != 100 {
+		t.Fatal("global lock not persisted")
+	}
+}
+func TestReusableEnrollmentCodeExpires(t *testing.T) {
+	c := regressionConfig(t)
+	c.Onboarding.OneTimeToken = false
+	if err := c.SetEnrollmentToken("123456789012"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if ok, _, _ := c.CheckEnrollmentToken("123456789012", true); !ok {
+			t.Fatal("reuse rejected")
+		}
+	}
+	c.Onboarding.TokenExpiresAt = time.Now().Add(-time.Second)
+	if ok, _, _ := c.CheckEnrollmentToken("123456789012", true); ok {
+		t.Fatal("expired reusable code accepted")
 	}
 }

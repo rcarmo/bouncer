@@ -11,7 +11,7 @@ A Go-based reverse proxy that protects backend HTTP services with [WebAuthn](htt
 - **iOS/macOS onboarding** — serves `.mobileconfig` profiles for trust installation
 - **Cloudflare Tunnel mode** — skip local TLS entirely, use Cloudflare for HTTPS
 - **Single JSON config** — config + user DB in one file; sessions in a separate file
-- **One-time enrollment token** — 6 digits, issued on demand, logged + optional Pushover; local-IP bypass supported
+- **One-time enrollment token** — 12 digits, issued on demand, optional Pushover; persisted lockout; local-IP bypass supported
 - **Enrollment alerts** — optional Pushover notifications with IP/UA/geo info
 - **Transparent reverse proxy** — authenticated users are forwarded to the backend seamlessly, including long-lived SSE streams and WebSocket upgrades
 - **Static binary** — single Go binary, Docker-ready
@@ -31,7 +31,7 @@ make build
 ./bouncer --cloudflare --onboarding --hostname bouncer.example.com --backend http://localhost:3000
 
 # Visit your Cloudflare hostname → /onboarding
-# Start registration to trigger a one-time token (printed to logs and sent via Pushover)
+# Start registration to trigger a one-time token (sent via Pushover; otherwise use the trusted reset command)
 ```
 
 ### Local TLS mode
@@ -40,7 +40,9 @@ make build
 # Run — generates CA + certs on first start
 ./bouncer --onboarding --hostname myhost.local --ip 192.168.1.50 --backend http://localhost:3000
 
-# Visit http://myhost.local/onboarding to install the trust profile
+# Independently obtain the CA SHA256: ./bouncer --fingerprint-CA
+# Visit http://myhost.local/onboarding, verify the downloaded certificate
+# against the trusted fingerprint, then install the trust profile
 # Then visit https://myhost.local/onboarding to create a passkey
 ```
 
@@ -48,7 +50,8 @@ make build
 
 ```bash
 make docker-build
-docker run -p 443:443 -p 80:80 -v $(pwd)/data:/data bouncer \
+docker volume create bouncer-data
+docker run -p 443:443 -p 80:80 -v bouncer-data:/data bouncer \
   --config /data/bouncer.json --onboarding --backend http://host.docker.internal:3000
 ```
 
@@ -66,13 +69,15 @@ Flags:
   --onboarding            Enable onboarding mode (allow registration)
   --cloudflare            Cloudflare Tunnel mode (no local TLS)
   --dbip-update           Download/update DB-IP Lite database and exit
+  --fingerprint-CA        Print existing CA certificate SHA256 through a trusted console
+  --reset-enrollment      Reset enrollment lockout, print a fresh code and exit
   --log-level <level>     debug|info|warn|error
 ```
 
 ## How It Works
 
 1. **Normal mode**: users must authenticate with a passkey to access the backend.
-2. **Onboarding mode** (`--onboarding`): new users can register a passkey using a one-time 6-digit token (issued on demand and logged). Local network users can bypass the token. Optional Pushover alerts can be sent with IP/UA + basic geolocation.
+2. **Onboarding mode** (`--onboarding`): new users can register a passkey using a one-time 12-digit token (issued on demand and optionally sent via Pushover). Local network users can bypass the token. Optional Pushover alerts can be sent with IP/UA + basic geolocation.
 3. **Cloudflare mode** (`--cloudflare`): Cloudflare provides HTTPS; Bouncer skips TLS and certificate onboarding.
 
 Sessions expire after 7 days (configurable) and are persisted across restarts.
@@ -80,7 +85,7 @@ Sessions expire after 7 days (configurable) and are persisted across restarts.
 ## Security Notes
 
 - WebAuthn endpoints enforce **same-origin** requests.
-- Sessions are **bound to the resolved site** in multi-site mode.
+- Sessions are **bound to the resolved site and exact passkey credential** in multi-site mode.
 - Session cookies are marked **Secure** when requests are HTTPS (or forwarded HTTPS via trusted proxies).
 - HSTS is emitted for HTTPS responses.
 - WebAuthn responses are **no-store** and servers use **read-header/read timeouts** plus max header size to mitigate slowloris attacks.
@@ -232,7 +237,7 @@ See [SPEC.md](SPEC.md) for the full JSON schema and configuration reference.
 ```
 
 Notes:
-- When `oneTimeToken` is `true`, tokens are issued on the first registration attempt and consumed after use. `rotateTokenOnStart` is ignored.
+- When `oneTimeToken` is `true`, tokens are issued on demand and consumed after use. All codes expire and share persisted failure limits; startup does not reset them.
 - When `preferCloudflareHeaders` is `true`, Cloudflare geolocation headers are used first (from trusted proxies), falling back to local DB-IP Lite or an optional external geoip URL if configured.
 - DB-IP Lite requires attribution to db-ip.com on any page that displays or uses the data.
 
@@ -272,10 +277,22 @@ Use `make clean-profiles` to remove allocation evidence explicitly. Normal `make
 
 Trusted proxies must overwrite `X-Forwarded-Host`/`X-Forwarded-Proto` and append the observed client address to `X-Forwarded-For`. Bouncer walks XFF right-to-left across trusted hops. Alternative client-IP headers do not authorise enrollment. Missing/malformed attribution never grants local bypass. Disable `onboarding.localBypass` when LAN membership must not permit enrollment.
 
-One-time tokens expire after 10 minutes or 10 incorrect non-empty guesses across all client IPs. Expiry/attempts survive restart. Successful registration options consume the token.
+All enrollment codes expire after 10 minutes and lock after 10 incorrect guesses across all client IPs. A persisted budget of 100 failures spans expired code generations. Automatic issuance, reload and restart cannot clear lockout. Only an operator reset clears it. Successful registration options consume a one-time code; reusable codes retain the same expiry and guess limits.
 
 Existing SSE/WebSocket connections retain their backend across SIGHUP; new requests use the new configuration. Removing a user blocks subsequent requests but does not terminate established streams. Session settings and listener addresses require restart.
 
 For local TLS, optional `server.httpListen` overrides the separate trust/download listener (default `:80`, or `:8080` with a nonstandard TLS port). HTTP onboarding links to the canonical HTTPS origin. Shared-host port aliases are ambiguous on the HTTP bootstrap listener; use their explicit HTTPS URLs.
 
 Existing synced passkeys created before backup flags were stored may need re-enrollment. Disable onboarding after provisioning and run only one Bouncer writer per config/session pair.
+
+## v0.1.1 security migration
+
+- Existing sessions remain stored but sessions without `credentialId` require a new passkey login. Removing that credential invalidates subsequent requests even when the account has other credentials. Established streams continue until disconnected; restart for immediate revocation.
+- New enrollment codes contain 12 digits. Legacy short codes keep their stored value with bounded lifetime/guesses; reset before provisioning new devices. For operator recovery, stop Bouncer, run `./bouncer --config bouncer.json --reset-enrollment` through a trusted console, and restart. Do not run a second writer against live state. Only this explicit reset clears the persisted lockout and global failure budget.
+- Root trust requires independent fingerprint verification. Run `./bouncer --config bouncer.json --fingerprint-CA` through a trusted server console. Compare the downloaded certificate with `openssl x509 -inform DER -in bouncer-ca.cer -noout -fingerprint -sha256` before installation. The HTTP page, its fingerprint and the unsigned profile can all be replaced on the network. A checkbox is guidance, not cryptographic verification.
+- WebSocket upgrades require one exact site `Origin`, including the configured port. Non-browser clients must send it. Bouncer UI uses external scripts under `script-src 'self'`; backend applications retain their own policy.
+- Images run as UID/GID `10001:10001` with `/data` as their writable working directory. Named volumes initialise with the image's ownership. Back up existing bind mounts, then grant this UID/GID ownership; no startup chown or root wrapper runs. A file capability permits ports 80/443; runtimes that strip capabilities need explicit bind capability or unprivileged listeners.
+- Gateway authentication has a 500-request/minute global ceiling, 4096 rate keys, 1024 pending challenges and 32 concurrent notification jobs per routing generation. Excess requests fail closed and excess notifications are dropped.
+- External GeoIP uses a 4096-entry FIFO cache with expiry eviction. JSON is capped at 1 MiB and discovery HTML at 2 MiB. DB-IP caps are 512 MiB compressed, 4 GiB expanded, 64 KiB per logical CSV record and 20 million records. Failed imports keep the old database.
+
+Run the profiled container check with `make test-container` or `make test-container CONTAINER_ENGINE='podman --cgroup-manager=cgroupfs'`. Its image enables the test-only `allocprofile` tag; normal Docker builds leave that tag empty. Test state stays under gitignored allocation evidence; the successful runner removes temporary CA/config state after retaining profiles.

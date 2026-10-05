@@ -204,7 +204,7 @@ func TestProcessStreams(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
-	disk.Users = nil
+	disk.Users[0].Credentials = []config.Credential{{ID: "replacement"}}
 	if e = disk.Save(); e != nil {
 		t.Fatal(e)
 	}

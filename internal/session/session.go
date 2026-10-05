@@ -15,11 +15,12 @@ import (
 
 // Session represents a single authenticated session.
 type Session struct {
-	ID        string `json:"id"`
-	SiteID    string `json:"site"`
-	UserID    string `json:"userId"`
-	CreatedAt string `json:"createdAt"`
-	LastSeen  string `json:"lastSeen"`
+	ID           string `json:"id"`
+	SiteID       string `json:"site"`
+	UserID       string `json:"userId"`
+	CredentialID string `json:"credentialId"`
+	CreatedAt    string `json:"createdAt"`
+	LastSeen     string `json:"lastSeen"`
 }
 
 // Store is an in-memory session store backed by a JSON file.
@@ -56,7 +57,10 @@ func NewStore(path string, ttlDays int) (*Store, error) {
 }
 
 // Create creates a new session for the given site/user and returns the session ID.
-func (s *Store) Create(siteID, userID string) (string, error) {
+func (s *Store) Create(siteID, userID string, credentialID string) (string, error) {
+	if credentialID == "" {
+		return "", fmt.Errorf("session: credential ID required")
+	}
 	id, err := randomSessionID()
 	if err != nil {
 		return "", err
@@ -72,6 +76,7 @@ func (s *Store) Create(siteID, userID string) (string, error) {
 		CreatedAt: now,
 		LastSeen:  now,
 	}
+	sess.CredentialID = credentialID
 	s.mu.Lock()
 	s.sessions[id] = sess
 	defer s.mu.Unlock()

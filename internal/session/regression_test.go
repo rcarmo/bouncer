@@ -13,7 +13,7 @@ func TestSessionCopyIsolationAndConcurrentPersistence(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Stop()
-	id, err := s.Create("default", "original")
+	id, err := s.Create("default", "original", "credential")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -33,7 +33,7 @@ func TestSessionCopyIsolationAndConcurrentPersistence(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			id, err := s.Create("default", "u")
+			id, err := s.Create("default", "u", "credential")
 			if err != nil {
 				t.Error(err)
 				return
@@ -62,12 +62,12 @@ func TestSessionPersistenceFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Stop()
-	id, err := s.Create("default", "u")
+	id, err := s.Create("default", "u", "credential")
 	if err != nil {
 		t.Fatal(err)
 	}
 	s.path = t.TempDir()
-	if _, err := s.Create("default", "new"); err == nil {
+	if _, err := s.Create("default", "new", "credential"); err == nil {
 		t.Fatal("expected create failure")
 	}
 	if len(s.sessions) != 1 {
@@ -78,5 +78,45 @@ func TestSessionPersistenceFailure(t *testing.T) {
 	}
 	if s.Get(id) != nil {
 		t.Fatal("failed disk deletion must revoke in memory")
+	}
+}
+
+func TestCredentialBindingSurvivesRestartAndLegacyStateIsPreserved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.json")
+	s, err := NewStore(path, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Stop()
+	if _, err := s.Create("default", "u", ""); err == nil {
+		t.Fatal("unbound session creation allowed")
+	}
+	id, err := s.Create("default", "u", "credential")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := NewStore(path, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer disk.Stop()
+	if sess := disk.Get(id); sess == nil || sess.CredentialID != "credential" {
+		t.Fatal("credential binding lost")
+	}
+	// Old data is loaded intact; admission rejects missing credential bindings.
+	s.mu.Lock()
+	s.sessions[id].CredentialID = ""
+	err = s.saveLocked()
+	s.mu.Unlock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := NewStore(path, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer legacy.Stop()
+	if legacy.Get(id) == nil {
+		t.Fatal("legacy state discarded")
 	}
 }

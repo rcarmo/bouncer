@@ -82,6 +82,8 @@ type OnboardingConfig struct {
 	Token              string    `json:"token"`
 	TokenExpiresAt     time.Time `json:"tokenExpiresAt,omitempty"`
 	TokenAttempts      int       `json:"tokenAttempts,omitempty"`
+	TokenFailures      int       `json:"tokenFailures,omitempty"`
+	TokenLocked        bool      `json:"tokenLocked,omitempty"`
 	RotateTokenOnStart bool      `json:"rotateTokenOnStart"`
 	OneTimeToken       bool      `json:"oneTimeToken"`
 	LocalBypass        bool      `json:"localBypass"`
@@ -352,6 +354,9 @@ func (c *Config) UpdateSignCount(siteID, userID, credID string, count uint32) er
 const EnrollmentTokenTTL = 10 * time.Minute
 const EnrollmentTokenMaxAttempts = 10
 
+// EnrollmentFailureBudget persists across automatic code generations until operator reset.
+const EnrollmentFailureBudget = 100
+
 // OnboardingSnapshot returns an independent, locked copy of onboarding settings.
 func (c *Config) OnboardingSnapshot() OnboardingConfig {
 	c.mu.RLock()
@@ -369,8 +374,10 @@ func (c *Config) SetEnrollmentToken(token string) error {
 	old := c.Onboarding
 	c.Onboarding.Token = strings.TrimSpace(token)
 	c.Onboarding.TokenAttempts = 0
+	c.Onboarding.TokenFailures = 0
+	c.Onboarding.TokenLocked = false
 	c.Onboarding.TokenExpiresAt = time.Time{}
-	if c.Onboarding.Token != "" && c.Onboarding.OneTimeToken {
+	if c.Onboarding.Token != "" {
 		c.Onboarding.TokenExpiresAt = time.Now().Add(EnrollmentTokenTTL).UTC()
 	}
 	if err := c.saveLocked(); err != nil {
@@ -380,12 +387,12 @@ func (c *Config) SetEnrollmentToken(token string) error {
 	return nil
 }
 
-// InitializeEnrollmentToken upgrades legacy one-time tokens once, persisting the
+// InitializeEnrollmentToken upgrades legacy tokens once, persisting the
 // deadline so subsequent restarts cannot extend their lifetime.
 func (c *Config) InitializeEnrollmentToken() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if !c.Onboarding.OneTimeToken || c.Onboarding.Token == "" || !c.Onboarding.TokenExpiresAt.IsZero() {
+	if c.Onboarding.Token == "" || !c.Onboarding.TokenExpiresAt.IsZero() {
 		return nil
 	}
 	c.Onboarding.TokenExpiresAt = time.Now().Add(EnrollmentTokenTTL).UTC()
@@ -403,18 +410,20 @@ func (c *Config) CheckEnrollmentToken(token string, consume bool) (bool, string,
 	defer c.mu.Unlock()
 	state := c.Onboarding
 	current := strings.TrimSpace(state.Token)
-	if state.OneTimeToken && (state.TokenExpiresAt.IsZero() || !time.Now().Before(state.TokenExpiresAt) || state.TokenAttempts >= EnrollmentTokenMaxAttempts) {
+	if state.TokenLocked || state.TokenAttempts >= EnrollmentTokenMaxAttempts || state.TokenFailures >= EnrollmentFailureBudget || state.TokenExpiresAt.IsZero() || !time.Now().Before(state.TokenExpiresAt) {
 		return false, "", nil
 	}
-	if current == "" || token == "" {
+	if current == "" {
 		return false, current, nil
 	}
 	valid := subtle.ConstantTimeCompare([]byte(token), []byte(current)) == 1
-	if consume && state.OneTimeToken {
-		if valid {
+	if consume {
+		if valid && state.OneTimeToken {
 			c.Onboarding.Token = ""
-		} else {
+		} else if !valid {
 			c.Onboarding.TokenAttempts++
+			c.Onboarding.TokenFailures++
+			c.Onboarding.TokenLocked = c.Onboarding.TokenAttempts >= EnrollmentTokenMaxAttempts || c.Onboarding.TokenFailures >= EnrollmentFailureBudget
 		}
 		if err := c.saveLocked(); err != nil {
 			c.Onboarding = state
@@ -437,4 +446,26 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("config: sessions must use a separate non-empty file")
 	}
 	return nil
+}
+
+// EnsureEnrollmentToken issues on demand without clearing persisted failure state.
+// Only the operator's SetEnrollmentToken resets lockout. Reusable codes also expire.
+func (c *Config) EnsureEnrollmentToken(token string) (string, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	old := c.Onboarding
+	if old.TokenLocked || old.TokenAttempts >= EnrollmentTokenMaxAttempts || old.TokenFailures >= EnrollmentFailureBudget {
+		return "", nil
+	}
+	if old.Token != "" && time.Now().Before(old.TokenExpiresAt) {
+		return old.Token, nil
+	}
+	c.Onboarding.Token = token
+	c.Onboarding.TokenAttempts = 0
+	c.Onboarding.TokenExpiresAt = time.Now().Add(EnrollmentTokenTTL).UTC()
+	if err := c.saveLocked(); err != nil {
+		c.Onboarding = old
+		return "", err
+	}
+	return token, nil
 }

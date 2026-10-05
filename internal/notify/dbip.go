@@ -1,7 +1,6 @@
 package notify
 
 import (
-	"bufio"
 	"compress/gzip"
 	"context"
 	"database/sql"
@@ -300,7 +299,7 @@ func (p *DBIPProvider) resolveUpdateURL(ctx context.Context) (string, error) {
 	if resp.StatusCode >= 300 {
 		return "", fmt.Errorf("dbip: update page status %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(resp.Body)
+	body, err := readBounded(resp.Body, maxUpdatePageBytes)
 	if err != nil {
 		return "", err
 	}
@@ -330,7 +329,7 @@ func (p *DBIPProvider) downloadAndBuild(ctx context.Context, url string) error {
 		return fmt.Errorf("dbip: download status %d", resp.StatusCode)
 	}
 
-	gz, err := gzip.NewReader(resp.Body)
+	gz, err := gzip.NewReader(&byteBudget{reader: resp.Body, remaining: maxDBIPCompressedBytes})
 	if err != nil {
 		return err
 	}
@@ -341,7 +340,7 @@ func (p *DBIPProvider) downloadAndBuild(ctx context.Context, url string) error {
 	}
 
 	tmpPath := fmt.Sprintf("%s.%d.tmp", p.dbPath, time.Now().UnixNano())
-	if err := p.buildDBContext(ctx, tmpPath, bufio.NewReader(gz), url); err != nil {
+	if err := p.buildDBContext(ctx, tmpPath, gz, url); err != nil {
 		_ = os.Remove(tmpPath)
 		return err
 	}
@@ -418,7 +417,8 @@ func (p *DBIPProvider) buildDBContext(ctx context.Context, path string, reader i
 	}
 	defer func() { _ = stmt.Close() }()
 
-	csvReader := csv.NewReader(reader)
+	csvReader := csv.NewReader(newCSVBudget(&byteBudget{reader: reader, remaining: maxDBIPExpandedBytes}, maxDBIPRecordBytes, maxDBIPRows))
+	csvReader.ReuseRecord = true
 	csvReader.FieldsPerRecord = -1
 
 	var count int

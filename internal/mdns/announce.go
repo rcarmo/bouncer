@@ -63,11 +63,7 @@ func Start(cfg *config.Config, sites []*config.SiteConfig) (*Announcer, error) {
 			continue
 		}
 		instance := serviceInstance(prefix, s)
-		text := []string{
-			"id=" + s.ID,
-			"origin=" + s.PublicOrigin,
-			"backend=" + s.Backend,
-		}
+		text := serviceTXT(s)
 		server, err := zeroconf.Register(instance, service, domain, port, text, nil)
 		if err != nil {
 			ann.Close()
@@ -147,4 +143,9 @@ func portFromListen(listen string) int {
 	}
 	p, _ := strconv.Atoi(port)
 	return p
+}
+
+// serviceTXT advertises public metadata only; backend URLs may contain credentials.
+func serviceTXT(s *config.SiteConfig) []string {
+	return []string{"id=" + s.ID, "origin=" + s.PublicOrigin}
 }
