@@ -1,11 +1,13 @@
-// Package config defines the Bouncer configuration types and JSON persistence.
+// Package config defines the Bouncer configuration types and YAML persistence.
 package config
 
 import (
+	"bytes"
 	"crypto/subtle"
-	"encoding/json"
 	"errors"
 	"fmt"
+	"gopkg.in/yaml.v3"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -16,131 +18,131 @@ import (
 	"github.com/rcarmo/bouncer/internal/atomicfile"
 )
 
-// Config is the top-level bouncer.json structure.
+// Config is the top-level bouncer.yaml structure.
 type Config struct {
-	Server     ServerConfig     `json:"server"`
-	Sites      []SiteConfig     `json:"sites,omitempty"`
-	Ingresses  []IngressConfig  `json:"ingresses"`
-	Session    SessionConfig    `json:"session"`
-	Onboarding OnboardingConfig `json:"onboarding"`
-	Users      []User           `json:"users"`
+	Server     ServerConfig     `json:"server" yaml:"server"`
+	Sites      []SiteConfig     `json:"sites,omitempty" yaml:"sites,omitempty"`
+	Ingresses  []IngressConfig  `json:"ingresses" yaml:"ingresses"`
+	Session    SessionConfig    `json:"session" yaml:"session"`
+	Onboarding OnboardingConfig `json:"onboarding" yaml:"onboarding"`
+	Users      []User           `json:"users" yaml:"users"`
 
-	mu   sync.RWMutex `json:"-"`
-	path string       `json:"-"`
+	mu   sync.RWMutex `json:"-" yaml:"-"`
+	path string       `json:"-" yaml:"-"`
 }
 
 type ServerConfig struct {
-	HTTPListen     string     `json:"httpListen,omitempty"`
-	Listen         string     `json:"listen"`
-	PublicOrigin   string     `json:"publicOrigin"`
-	RPID           string     `json:"rpID"`
-	Backend        string     `json:"backend"`
-	Hostnames      []string   `json:"hostnames"`
-	IPAddresses    []string   `json:"ipAddresses"`
-	TrustedProxies []string   `json:"trustedProxies"`
-	TLS            TLSConfig  `json:"tls"`
-	Cloudflare     bool       `json:"cloudflare"`
-	MDNS           MDNSConfig `json:"mdns"`
+	HTTPListen     string     `json:"httpListen,omitempty" yaml:"httpListen,omitempty"`
+	Listen         string     `json:"listen" yaml:"listen"`
+	PublicOrigin   string     `json:"publicOrigin" yaml:"publicOrigin"`
+	RPID           string     `json:"rpID" yaml:"rpID"`
+	Backend        string     `json:"backend" yaml:"backend"`
+	Hostnames      []string   `json:"hostnames" yaml:"hostnames"`
+	IPAddresses    []string   `json:"ipAddresses" yaml:"ipAddresses"`
+	TrustedProxies []string   `json:"trustedProxies" yaml:"trustedProxies"`
+	TLS            TLSConfig  `json:"tls" yaml:"tls"`
+	Cloudflare     bool       `json:"cloudflare" yaml:"cloudflare"`
+	MDNS           MDNSConfig `json:"mdns" yaml:"mdns"`
 }
 
 // MDNSConfig controls Bonjour/mDNS service announcements for local discovery.
 type MDNSConfig struct {
-	Enabled        bool   `json:"enabled"`
-	Service        string `json:"service"`
-	Domain         string `json:"domain"`
-	InstancePrefix string `json:"instancePrefix"`
+	Enabled        bool   `json:"enabled" yaml:"enabled"`
+	Service        string `json:"service" yaml:"service"`
+	Domain         string `json:"domain" yaml:"domain"`
+	InstancePrefix string `json:"instancePrefix" yaml:"instancePrefix"`
 }
 
 // SiteConfig defines a single public site and its backend.
 type SiteConfig struct {
-	ID           string   `json:"id"`
-	PublicOrigin string   `json:"publicOrigin"`
-	RPID         string   `json:"rpID"`
-	Backend      string   `json:"backend"`
-	Hostnames    []string `json:"hostnames"`
-	IPAddresses  []string `json:"ipAddresses"`
-	Listen       string   `json:"listen,omitempty"`
+	ID           string   `json:"id" yaml:"id"`
+	PublicOrigin string   `json:"publicOrigin" yaml:"publicOrigin"`
+	RPID         string   `json:"rpID" yaml:"rpID"`
+	Backend      string   `json:"backend" yaml:"backend"`
+	Hostnames    []string `json:"hostnames" yaml:"hostnames"`
+	IPAddresses  []string `json:"ipAddresses" yaml:"ipAddresses"`
+	Listen       string   `json:"listen,omitempty" yaml:"listen,omitempty"`
 }
 
 type TLSConfig struct {
-	CA         *KeyPair `json:"ca,omitempty"`
-	ServerCert *KeyPair `json:"serverCert,omitempty"`
+	CA         *KeyPair `json:"ca,omitempty" yaml:"ca,omitempty"`
+	ServerCert *KeyPair `json:"serverCert,omitempty" yaml:"serverCert,omitempty"`
 }
 
 type KeyPair struct {
-	CertPem string `json:"certPem"`
-	KeyPem  string `json:"keyPem"`
+	CertPem string `json:"certPem" yaml:"certPem"`
+	KeyPem  string `json:"keyPem" yaml:"keyPem"`
 }
 
 type SessionConfig struct {
-	TTLDays    int    `json:"ttlDays"`
-	CookieName string `json:"cookieName"`
-	File       string `json:"file"`
+	TTLDays    int    `json:"ttlDays" yaml:"ttlDays"`
+	CookieName string `json:"cookieName" yaml:"cookieName"`
+	File       string `json:"file" yaml:"file"`
 }
 
 type OnboardingConfig struct {
-	Enabled            bool      `json:"enabled"`
-	Token              string    `json:"token"`
-	TokenExpiresAt     time.Time `json:"tokenExpiresAt,omitempty"`
-	TokenAttempts      int       `json:"tokenAttempts,omitempty"`
-	TokenFailures      int       `json:"tokenFailures,omitempty"`
-	TokenLocked        bool      `json:"tokenLocked,omitempty"`
-	RotateTokenOnStart bool      `json:"rotateTokenOnStart"`
-	OneTimeToken       bool      `json:"oneTimeToken"`
-	LocalBypass        bool      `json:"localBypass"`
-	ProfileURL         string    `json:"profileUrl"`
-	MacCertURL         string    `json:"macCertUrl"`
+	Enabled            bool      `json:"enabled" yaml:"enabled"`
+	Token              string    `json:"token" yaml:"token"`
+	TokenExpiresAt     time.Time `json:"tokenExpiresAt,omitempty" yaml:"tokenExpiresAt,omitempty"`
+	TokenAttempts      int       `json:"tokenAttempts,omitempty" yaml:"tokenAttempts,omitempty"`
+	TokenFailures      int       `json:"tokenFailures,omitempty" yaml:"tokenFailures,omitempty"`
+	TokenLocked        bool      `json:"tokenLocked,omitempty" yaml:"tokenLocked,omitempty"`
+	RotateTokenOnStart bool      `json:"rotateTokenOnStart" yaml:"rotateTokenOnStart"`
+	OneTimeToken       bool      `json:"oneTimeToken" yaml:"oneTimeToken"`
+	LocalBypass        bool      `json:"localBypass" yaml:"localBypass"`
+	ProfileURL         string    `json:"profileUrl" yaml:"profileUrl"`
+	MacCertURL         string    `json:"macCertUrl" yaml:"macCertUrl"`
 	Instructions       struct {
-		IOS []string `json:"ios"`
-	} `json:"instructions"`
-	Pushover PushoverConfig `json:"pushover"`
-	GeoIP    GeoIPConfig    `json:"geoip"`
+		IOS []string `json:"ios" yaml:"ios"`
+	} `json:"instructions" yaml:"instructions"`
+	Pushover PushoverConfig `json:"pushover" yaml:"pushover"`
+	GeoIP    GeoIPConfig    `json:"geoip" yaml:"geoip"`
 }
 
 type PushoverConfig struct {
-	Enabled        bool   `json:"enabled"`
-	APIToken       string `json:"apiToken"`
-	UserKey        string `json:"userKey"`
-	Device         string `json:"device,omitempty"`
-	Sound          string `json:"sound,omitempty"`
-	TimeoutSeconds int    `json:"timeoutSeconds"`
+	Enabled        bool   `json:"enabled" yaml:"enabled"`
+	APIToken       string `json:"apiToken" yaml:"apiToken"`
+	UserKey        string `json:"userKey" yaml:"userKey"`
+	Device         string `json:"device,omitempty" yaml:"device,omitempty"`
+	Sound          string `json:"sound,omitempty" yaml:"sound,omitempty"`
+	TimeoutSeconds int    `json:"timeoutSeconds" yaml:"timeoutSeconds"`
 }
 
 type GeoIPConfig struct {
-	Enabled                 bool       `json:"enabled"`
-	URL                     string     `json:"url"`
-	TimeoutSeconds          int        `json:"timeoutSeconds"`
-	CacheTTLSeconds         int        `json:"cacheTtlSeconds"`
-	PreferCloudflareHeaders bool       `json:"preferCloudflareHeaders"`
-	DBIP                    DBIPConfig `json:"dbip"`
+	Enabled                 bool       `json:"enabled" yaml:"enabled"`
+	URL                     string     `json:"url" yaml:"url"`
+	TimeoutSeconds          int        `json:"timeoutSeconds" yaml:"timeoutSeconds"`
+	CacheTTLSeconds         int        `json:"cacheTtlSeconds" yaml:"cacheTtlSeconds"`
+	PreferCloudflareHeaders bool       `json:"preferCloudflareHeaders" yaml:"preferCloudflareHeaders"`
+	DBIP                    DBIPConfig `json:"dbip" yaml:"dbip"`
 }
 
 type DBIPConfig struct {
-	Enabled                bool   `json:"enabled"`
-	DatabasePath           string `json:"databasePath"`
-	AutoUpdate             bool   `json:"autoUpdate"`
-	UpdateIntervalHours    int    `json:"updateIntervalHours"`
-	UpdatePageURL          string `json:"updatePageUrl"`
-	UpdateURL              string `json:"updateUrl"`
-	DownloadTimeoutSeconds int    `json:"downloadTimeoutSeconds"`
+	Enabled                bool   `json:"enabled" yaml:"enabled"`
+	DatabasePath           string `json:"databasePath" yaml:"databasePath"`
+	AutoUpdate             bool   `json:"autoUpdate" yaml:"autoUpdate"`
+	UpdateIntervalHours    int    `json:"updateIntervalHours" yaml:"updateIntervalHours"`
+	UpdatePageURL          string `json:"updatePageUrl" yaml:"updatePageUrl"`
+	UpdateURL              string `json:"updateUrl" yaml:"updateUrl"`
+	DownloadTimeoutSeconds int    `json:"downloadTimeoutSeconds" yaml:"downloadTimeoutSeconds"`
 }
 
 type User struct {
-	ID          string       `json:"id"`
-	SiteID      string       `json:"site,omitempty"`
-	DisplayName string       `json:"displayName"`
-	Name        string       `json:"name"`
-	Credentials []Credential `json:"credentials"`
+	ID          string       `json:"id" yaml:"id"`
+	SiteID      string       `json:"site,omitempty" yaml:"site,omitempty"`
+	DisplayName string       `json:"displayName" yaml:"displayName"`
+	Name        string       `json:"name" yaml:"name"`
+	Credentials []Credential `json:"credentials" yaml:"credentials"`
 }
 
 type Credential struct {
-	ID             string   `json:"id"`
-	PublicKey      string   `json:"publicKey"`
-	SignCount      uint32   `json:"signCount"`
-	Transports     []string `json:"transports"`
-	CreatedAt      string   `json:"createdAt"`
-	BackupEligible bool     `json:"backupEligible"`
-	BackupState    bool     `json:"backupState"`
+	ID             string   `json:"id" yaml:"id"`
+	PublicKey      string   `json:"publicKey" yaml:"publicKey"`
+	SignCount      uint32   `json:"signCount" yaml:"signCount"`
+	Transports     []string `json:"transports" yaml:"transports"`
+	CreatedAt      string   `json:"createdAt" yaml:"createdAt"`
+	BackupEligible bool     `json:"backupEligible" yaml:"backupEligible"`
+	BackupState    bool     `json:"backupState" yaml:"backupState"`
 }
 
 // Defaults returns a Config with sensible defaults.
@@ -221,8 +223,14 @@ func Load(path string) (*Config, error) {
 
 	cfg := Defaults()   // Non-listener settings retain defaults.
 	cfg.Ingresses = nil // Existing files must explicitly declare authoritative ingresses.
-	if err := json.Unmarshal(data, cfg); err != nil {
-		return nil, fmt.Errorf("config: parse: %w", err)
+	decoder := yaml.NewDecoder(bytes.NewReader(data))
+	decoder.KnownFields(true)
+	if err := decoder.Decode(cfg); err != nil {
+		return nil, fmt.Errorf("config: parse YAML: %w", err)
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return nil, fmt.Errorf("config: expected one YAML document")
 	}
 	cfg.path = absPath
 	if err := cfg.Validate(); err != nil {
@@ -239,11 +247,16 @@ func (c *Config) Save() error {
 }
 
 func (c *Config) saveLocked() error {
-	data, err := json.MarshalIndent(c, "", "  ")
-	if err != nil {
-		return fmt.Errorf("config: marshal: %w", err)
+	var data bytes.Buffer
+	encoder := yaml.NewEncoder(&data)
+	encoder.SetIndent(2)
+	if err := encoder.Encode(c); err != nil {
+		return fmt.Errorf("config: encode YAML: %w", err)
 	}
-	return atomicfile.Write(c.path, data, 0600)
+	if err := encoder.Close(); err != nil {
+		return fmt.Errorf("config: finish YAML: %w", err)
+	}
+	return atomicfile.Write(c.path, data.Bytes(), 0600)
 }
 
 // Path returns the config file path.
@@ -472,7 +485,7 @@ func (c *Config) Validate() error {
 	if c.Session.TTLDays <= 0 || c.Session.TTLDays > 3650 {
 		return fmt.Errorf("config: session ttlDays must be between 1 and 3650")
 	}
-	cookie := http.Cookie{Name: c.Session.CookieName, Value: "validation"}
+	cookie := http.Cookie{Name: c.Session.CookieName, Value: "validation", Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode}
 	if err := cookie.Valid(); err != nil {
 		return fmt.Errorf("config: cookieName: %w", err)
 	}

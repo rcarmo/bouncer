@@ -60,7 +60,7 @@ func main() {
 	)
 
 	flag.BoolVar(&checkConfig, "check-config", false, "Validate sites and ingresses without starting listeners or reading secrets")
-	flag.StringVar(&configPath, "config", "bouncer.json", "Path to JSON config")
+	flag.StringVar(&configPath, "config", "bouncer.yaml", "Path to YAML config")
 	flag.StringVar(&listen, "listen", "", "Listen address (overrides config)")
 	flag.StringVar(&backend, "backend", "", "Backend URL (overrides config)")
 	flag.BoolVar(&onboarding, "onboarding", false, "Enable onboarding mode")

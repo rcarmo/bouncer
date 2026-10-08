@@ -4,7 +4,13 @@ Bouncer uses `ingresses[]` as the authoritative listener list. Sites describe ap
 
 Implementation is locally tested for routing, policy and live local-listener reload. Real Funnel connectivity/enrollment has not been verified with a tailnet account. No production configuration has been changed.
 
-## Migrating existing configuration
+## YAML persistence and migration
+
+The default path is `bouncer.yaml`. YAML loading rejects unknown fields, duplicate mapping keys and multiple documents. Quote enrollment codes and other numeric-looking identifiers. PEM certificates/keys are saved as multiline blocks. Persistence rewrites configuration and does **not** preserve comments, original ordering or formatting; this happens after credential/enrollment updates as well as reload. Sessions remain JSON.
+
+JSON is a YAML subset: the loader can read existing JSON content with the same field names, but its next save writes YAML. With the writer stopped, back up the current configuration and rename/copy it to `bouncer.yaml`, then update the service/container `--config` path. Do not leave a stale second file selected by an old launch command. No credential, CA or identity reset is required. `--check-config` validates without converting an existing file; successful startup persists YAML. Old binaries expecting JSON cannot read the rewritten file, so rollback requires deliberate offline conversion while preserving current security state.
+
+## Migrating existing ingress configuration
 
 Back up configuration, sessions and CA/identity state before editing. Add explicit `ingresses[]` for every required listener. Move listener TLS, trusted proxies and mDNS settings into each local ingress; retained server/site `listen` and server `httpListen` fields do not create sockets. Preserve stable site IDs, RP IDs, public origins and user credentials. Remove rejected listener/backend/hostname/IP/Cloudflare flags from launch commands, validate with `--check-config`, then reload or restart as required. Never copy production secrets into examples.
 
@@ -12,19 +18,43 @@ When using explicit `sites[]`, reference those IDs from each ingress. The built-
 
 ## Two apps and a LAN listener
 
-```json
-{
-  "sites": [
-    {"id":"notes-lan","publicOrigin":"https://notes.local","rpID":"notes.local","backend":"http://notes:3000"},
-    {"id":"notes-public","publicOrigin":"https://notes.example.ts.net","rpID":"notes.example.ts.net","backend":"http://notes:3000"},
-    {"id":"photos-public","publicOrigin":"https://photos.example.ts.net","rpID":"photos.example.ts.net","backend":"http://photos:3000"}
-  ],
-  "ingresses": [
-    {"id":"lan","type":"local","siteIds":["notes-lan"],"local":{"listen":":443","mdns":{"enabled":true}}},
-    {"id":"notes","type":"tsnet","siteIds":["notes-public"],"tsnet":{"hostname":"notes","authKeyEnv":"TS_AUTHKEY_NOTES"}},
-    {"id":"photos","type":"tsnet","siteIds":["photos-public"],"tsnet":{"hostname":"photos","authKeyEnv":"TS_AUTHKEY_PHOTOS"}}
-  ]
-}
+```yaml
+sites:
+  - id: notes-lan
+    publicOrigin: https://notes.local
+    rpID: notes.local
+    backend: http://notes:3000
+  - id: notes-public
+    publicOrigin: https://notes.example.ts.net
+    rpID: notes.example.ts.net
+    backend: http://notes:3000
+  - id: photos-public
+    publicOrigin: https://photos.example.ts.net
+    rpID: photos.example.ts.net
+    backend: http://photos:3000
+ingresses:
+  - id: lan
+    type: local
+    siteIds:
+      - notes-lan
+    local:
+      listen: ":443"
+      mdns:
+        enabled: true
+  - id: notes
+    type: tsnet
+    siteIds:
+      - notes-public
+    tsnet:
+      hostname: notes
+      authKeyEnv: TS_AUTHKEY_NOTES
+  - id: photos
+    type: tsnet
+    siteIds:
+      - photos-public
+    tsnet:
+      hostname: photos
+      authKeyEnv: TS_AUTHKEY_PHOTOS
 ```
 
 Replace the tailnet suffix and backends with your own. The examples contain secret variable names, never keys. Each hostname has its own passkey/session scope; LAN and public origins do not share registrations automatically.
@@ -58,8 +88,15 @@ MagicDNS, HTTPS and Funnel permission must be enabled in the tailnet. State must
 
 Declare an HTTP bootstrap ingress alongside local HTTPS:
 
-```json
-{"id":"trust","type":"local","siteIds":["notes-lan"],"local":{"listen":":80","tls":"off","bootstrap":true}}
+```yaml
+id: trust
+type: local
+siteIds:
+  - notes-lan
+local:
+  listen: ":80"
+  tls: "off"
+  bootstrap: true
 ```
 
 Visit HTTP `/onboarding` to download the root certificate/profile. Compare `--fingerprint-CA` output through an independent trusted channel before installation. Bootstrap requires TLS off and no trusted proxies. Its allowlist must refer to a site with an HTTPS `publicOrigin` served by a local-CA ingress.
@@ -70,18 +107,26 @@ Only sites attached to local-CA ingresses contribute certificate SANs. Only loca
 
 Keep cloudflared external and configure its origin socket explicitly:
 
-```json
-{"id":"cloudflare-origin","type":"local","siteIds":["public-app"],"local":{"listen":"127.0.0.1:8080","tls":"off","trustedProxies":["127.0.0.1/32"]}}
+```yaml
+id: cloudflare-origin
+type: local
+siteIds:
+  - public-app
+local:
+  listen: 127.0.0.1:8080
+  tls: "off"
+  trustedProxies:
+    - 127.0.0.1/32
 ```
 
-No automatic loopback trust is added. Restrict the socket and require the proxy to overwrite forwarded host/scheme and append observed-client attribution. The retained `server.cloudflare` field controls certificate-step presentation and certificate-route registration in the main router; it does not create listeners or set trust. The old listener/hostname/backend CLI override flags are rejected; edit the JSON instead.
+No automatic loopback trust is added. Restrict the socket and require the proxy to overwrite forwarded host/scheme and append observed-client attribution. The retained `server.cloudflare` field controls certificate-step presentation and certificate-route registration in the main router; it does not create listeners or set trust. The old listener/hostname/backend CLI override flags are rejected; edit the YAML instead.
 
 ## Validation and live reload
 
 ```sh
 make build
-./bouncer --config /data/bouncer.json --check-config
-./bouncer --config /data/bouncer.json --onboarding
+./bouncer --config /data/bouncer.yaml --check-config
+./bouncer --config /data/bouncer.yaml --onboarding
 # After editing and checking the file:
 kill -HUP <pid>
 ```

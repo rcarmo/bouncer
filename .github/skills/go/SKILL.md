@@ -17,4 +17,4 @@ Use the existing Make targets and follow [AGENTS.md](../../../AGENTS.md). Do not
 - `make bench TEST_PACKAGES='./internal/session ./internal/site'`: per-operation allocation benchmarks.
 - `make profile PROFILE_MODE=integration`: explicit pre-release allocation capture; inspect both space/object summaries before removing raw captures.
 
-Go 1.26.6 is the module/container minimum. Respect the Makefile's portable project-scoped cache paths and retain only concise profiling findings after analysis. CI runs Make targets; source publication and deployment are separate actions.
+Go 1.27.1 is the module/container minimum. Respect the Makefile's portable project-scoped cache paths and retain only concise profiling findings after analysis. CI runs Make targets; source publication and deployment are separate actions.

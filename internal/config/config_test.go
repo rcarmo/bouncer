@@ -45,7 +45,7 @@ func TestDefaults(t *testing.T) {
 
 func TestLoadCreatesDefault(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bouncer.json")
+	path := filepath.Join(dir, "bouncer.yaml")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestLoadCreatesDefault(t *testing.T) {
 
 func TestLoadExisting(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bouncer.json")
+	path := filepath.Join(dir, "bouncer.yaml")
 
 	data := []byte(`{"server":{"listen":":9999","backend":"http://localhost:5000"},"session":{"ttlDays":14}}`)
 	if err := os.WriteFile(path, data, 0600); err != nil {
@@ -91,7 +91,7 @@ func TestLoadExisting(t *testing.T) {
 
 func TestSaveAndReload(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bouncer.json")
+	path := filepath.Join(dir, "bouncer.yaml")
 
 	cfg, _ := Load(path)
 	cfg.Onboarding.Token = "123456"
@@ -110,7 +110,7 @@ func TestSaveAndReload(t *testing.T) {
 
 func TestAddUserAndFind(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bouncer.json")
+	path := filepath.Join(dir, "bouncer.yaml")
 
 	cfg, _ := Load(path)
 	u := User{
@@ -145,7 +145,7 @@ func TestAddUserAndFind(t *testing.T) {
 
 func TestUpdateSignCount(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bouncer.json")
+	path := filepath.Join(dir, "bouncer.yaml")
 
 	cfg, _ := Load(path)
 	if err := cfg.AddUser(User{
@@ -167,7 +167,7 @@ func TestUpdateSignCount(t *testing.T) {
 
 func TestSessionFilePath(t *testing.T) {
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bouncer.json")
+	path := filepath.Join(dir, "bouncer.yaml")
 
 	cfg, _ := Load(path)
 	got := cfg.SessionFilePath()

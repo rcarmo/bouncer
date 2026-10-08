@@ -2,6 +2,8 @@
 node_modules
 bouncer
 bouncer.json
+bouncer.yaml
+bouncer.yml
 sessions.json
 *.sqlite*
 *.db

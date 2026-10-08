@@ -4,7 +4,7 @@ Bouncer protects HTTP backends with WebAuthn passkeys and persistent, site- and 
 
 ## Configuration and ingress
 
-`bouncer.json` contains configuration, TLS material and user credentials. `sessions.json` stores sessions separately. [INGRESSES.md](docs/INGRESSES.md) defines the ingress schema, defaults, validation and migration requirements.
+`bouncer.yaml` contains configuration, TLS material and user credentials. `sessions.json` stores sessions separately. [INGRESSES.md](docs/INGRESSES.md) defines the ingress schema, defaults, validation and migration requirements.
 
 - `sites[]` defines stable IDs, public origins, RP IDs, backend URLs and host/IP aliases. Origins must be absolute HTTP(S) URLs without credentials, query or fragment; backend URLs must be absolute HTTP(S) URLs.
 - `ingresses[]` is required in existing configuration files and owns listeners, TLS, proxy trust and discovery. There is no legacy listener normalisation. Up to 32 entries are accepted; at least one must be enabled.
@@ -76,13 +76,13 @@ Session storage/settings require restart. Changes conflicting with an active soc
 ## Commands and verification
 
 ```sh
-./bouncer --config /data/bouncer.json --check-config
-./bouncer --config /data/bouncer.json --onboarding
-./bouncer --config /data/bouncer.json --fingerprint-CA
+./bouncer --config /data/bouncer.yaml --check-config
+./bouncer --config /data/bouncer.yaml --onboarding
+./bouncer --config /data/bouncer.yaml --fingerprint-CA
 # Service stopped; deliberate enrollment reset:
-./bouncer --config /data/bouncer.json --reset-enrollment
+./bouncer --config /data/bouncer.yaml --reset-enrollment
 # DB-IP enabled in configuration:
-./bouncer --config /data/bouncer.json --dbip-update
+./bouncer --config /data/bouncer.yaml --dbip-update
 kill -HUP <pid>
 ```
 

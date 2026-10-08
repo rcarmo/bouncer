@@ -9,7 +9,7 @@ import (
 )
 
 func TestPrepareDoesNotPersistCandidate(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	c, e := config.Load(path)
 	if e != nil {
 		t.Fatal(e)
@@ -37,7 +37,7 @@ func TestPrepareDoesNotPersistCandidate(t *testing.T) {
 }
 
 func TestPrepareEnrollmentTokenDoesNotPersist(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "config.json")
+	path := filepath.Join(t.TempDir(), "config.yaml")
 	c, e := config.Load(path)
 	if e != nil {
 		t.Fatal(e)

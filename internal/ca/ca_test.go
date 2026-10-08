@@ -12,7 +12,7 @@ import (
 func loadTestConfig(t *testing.T) *config.Config {
 	t.Helper()
 	dir := t.TempDir()
-	path := filepath.Join(dir, "bouncer.json")
+	path := filepath.Join(dir, "bouncer.yaml")
 	cfg, err := config.Load(path)
 	if err != nil {
 		t.Fatalf("Load: %v", err)

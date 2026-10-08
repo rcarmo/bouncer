@@ -39,7 +39,7 @@ PROFILE_ROOT ?= $(WORKSPACE_TEST_DIR)/allocations
 
 GOBIN ?= $(shell GOTOOLCHAIN=local go env GOPATH)/bin
 export PATH := $(GOBIN):$(PATH)
-LINT_TOOLCHAIN ?= go1.26.6
+LINT_TOOLCHAIN ?= go1.27.1
 
 # Routine tests are uncached and unprofiled; profile is an explicit pre-release target.
 TEST_PACKAGES ?= ./...
@@ -69,7 +69,7 @@ build: ## Build the Go binary
 
 .PHONY: run
 run: build ## Run the server locally
-	./$(BINARY) --config bouncer.json --onboarding
+	./$(BINARY) --config bouncer.yaml --onboarding
 
 # =============================================================================
 # Docker
@@ -100,10 +100,15 @@ deps: ## Download Go module dependencies
 .PHONY: install
 install: deps ## Install project dependencies
 
+.PHONY: rebuild-dev-tools
+rebuild-dev-tools: workspace-prepare ## Rebuild lint tools with the configured current Go toolchain
+	GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+	GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+
 .PHONY: install-dev
 install-dev: ## Install dev tools (golangci-lint, gosec)
-	@command -v golangci-lint >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.11.4
-	@command -v gosec >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.24.6
+	@command -v golangci-lint >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
+	@command -v gosec >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
 
 # =============================================================================
 # Quality

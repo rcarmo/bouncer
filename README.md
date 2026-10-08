@@ -10,7 +10,7 @@ Bouncer protects HTTP backends with [WebAuthn](https://webauthn.guide/) passkeys
 - **Built-in CA** — generates root CA + server certs automatically (no mkcert needed)
 - **iOS/macOS onboarding** — serves `.mobileconfig` profiles for trust installation
 - **Uniform ingresses** — local sockets, optional mDNS and multiple embedded tsnet/Funnel nodes
-- **Single JSON config** — config + user DB in one file; sessions in a separate file
+- **Single YAML config** — config + user DB in one file; sessions in a separate file
 - **One-time enrollment token** — 12 digits, issued on demand, optional Pushover; persisted lockout; local-IP bypass supported
 - **Enrollment alerts** — optional Pushover notifications with IP/UA/geo info
 - **Transparent reverse proxy** — authenticated users are forwarded to the backend, including long-lived SSE streams and WebSocket upgrades
@@ -21,14 +21,14 @@ Bouncer protects HTTP backends with [WebAuthn](https://webauthn.guide/) passkeys
 
 ## Quick start
 
-Requires Go 1.26.6 or newer. Live tsnet/Funnel enrollment, certificates and teardown have not yet been verified with a tailnet account; local security, lifecycle and browser tests have passed. See [live acceptance](docs/TSNET-PLAN.md#authorised-live-acceptance).
+Requires Go 1.27.1 or newer. Live tsnet/Funnel enrollment, certificates and teardown have not yet been verified with a tailnet account; local security, lifecycle and browser tests have passed. See [live acceptance](docs/TSNET-PLAN.md#authorised-live-acceptance).
 
 Configure `sites[]` and `ingresses[]`, then validate and run:
 
 ```sh
 make build
-./bouncer --config bouncer.json --check-config
-./bouncer --config bouncer.json --onboarding
+./bouncer --config bouncer.yaml --check-config
+./bouncer --config bouncer.yaml --onboarding
 # After editing:
 kill -HUP <pid>
 ```
@@ -37,7 +37,7 @@ See [uniform ingress configuration](docs/INGRESSES.md) for local/mDNS, external 
 
 ## CLI
 
-- `--config <path>`: JSON configuration path.
+- `--config <path>`: YAML configuration path.
 - `--check-config`: validate sites/ingresses without starting listeners or resolving secrets.
 - `--onboarding`: enable enrollment.
 - `--fingerprint-CA`: print existing trust root SHA256.
@@ -68,35 +68,29 @@ Sessions expire after 7 days (configurable) and are persisted across restarts.
 
 ### Onboarding notifications (optional)
 
-```json
-{
-  "onboarding": {
-    "enabled": true,
-    "oneTimeToken": true,
-    "rotateTokenOnStart": false,
-    "localBypass": true,
-    "pushover": {
-      "enabled": true,
-      "apiToken": "pushover-app-token",
-      "userKey": "pushover-user-key",
-      "device": "iphone",
-      "sound": "pushover"
-    },
-    "geoip": {
-      "enabled": true,
-      "timeoutSeconds": 2,
-      "cacheTtlSeconds": 3600,
-      "preferCloudflareHeaders": true,
-      "dbip": {
-        "enabled": true,
-        "databasePath": "dbip-city-lite.sqlite",
-        "autoUpdate": true,
-        "updateIntervalHours": 24,
-        "updatePageUrl": "https://db-ip.com/db/download/ip-to-city-lite"
-      }
-    }
-  }
-}
+```yaml
+onboarding:
+  enabled: true
+  oneTimeToken: true
+  rotateTokenOnStart: false
+  localBypass: true
+  pushover:
+    enabled: true
+    apiToken: pushover-app-token
+    userKey: pushover-user-key
+    device: iphone
+    sound: pushover
+  geoip:
+    enabled: true
+    timeoutSeconds: 2
+    cacheTtlSeconds: 3600
+    preferCloudflareHeaders: true
+    dbip:
+      enabled: true
+      databasePath: dbip-city-lite.sqlite
+      autoUpdate: true
+      updateIntervalHours: 24
+      updatePageUrl: https://db-ip.com/db/download/ip-to-city-lite
 ```
 
 Notes:
@@ -104,7 +98,13 @@ Notes:
 - When `preferCloudflareHeaders` is `true`, Cloudflare geolocation headers are used first (from explicitly trusted local-ingress proxies; never tsnet), falling back to local DB-IP Lite or an optional external geoip URL if configured.
 - DB-IP Lite requires attribution to db-ip.com on any page that displays or uses the data.
 
+## YAML configuration
+
+Configuration defaults to `bouncer.yaml`; sessions remain `sessions.json`. Unknown fields, duplicate YAML keys and multiple documents are rejected. Saves use two-space indentation and multiline PEM blocks, but do not preserve comments or original formatting. Quote numeric-looking codes/IDs. Existing JSON content is readable; the next successful save writes YAML. Stop the writer, back up current state and update the launch path when migrating. See [YAML migration](docs/INGRESSES.md#yaml-persistence-and-migration).
+
 ## Documentation
+
+- [Operations manual](docs/OPERATIONS.md): deployment, provisioning, reloads, backups, recovery and troubleshooting.
 
 - [Specification](SPEC.md): authentication, persistence and request contracts.
 - [Ingress configuration](docs/INGRESSES.md): migration, examples, secrets and reload rules.
@@ -156,8 +156,8 @@ Existing synced passkeys created before backup flags were stored may need re-enr
 ## v0.1.1 security migration
 
 - Existing sessions remain stored but sessions without `credentialId` require a new passkey login. Removing that credential invalidates subsequent requests even when the account has other credentials. Established streams continue until disconnected; restart for immediate revocation.
-- New enrollment codes contain 12 digits. Legacy short codes keep their stored value with bounded lifetime/guesses; reset before provisioning new devices. For operator recovery, stop Bouncer, run `./bouncer --config bouncer.json --reset-enrollment` through a trusted console, and restart. Do not run a second writer against live state. Only this explicit reset clears the persisted lockout and global failure budget.
-- Root trust requires independent fingerprint verification. Run `./bouncer --config bouncer.json --fingerprint-CA` through a trusted server console. Compare the downloaded certificate with `openssl x509 -inform DER -in bouncer-ca.cer -noout -fingerprint -sha256` before installation. The HTTP page, its fingerprint and the unsigned profile can all be replaced on the network. A checkbox is guidance, not cryptographic verification.
+- New enrollment codes contain 12 digits. Legacy short codes keep their stored value with bounded lifetime/guesses; reset before provisioning new devices. For operator recovery, stop Bouncer, run `./bouncer --config bouncer.yaml --reset-enrollment` through a trusted console, and restart. Do not run a second writer against live state. Only this explicit reset clears the persisted lockout and global failure budget.
+- Root trust requires independent fingerprint verification. Run `./bouncer --config bouncer.yaml --fingerprint-CA` through a trusted server console. Compare the downloaded certificate with `openssl x509 -inform DER -in bouncer-ca.cer -noout -fingerprint -sha256` before installation. The HTTP page, its fingerprint and the unsigned profile can all be replaced on the network. A checkbox is guidance, not cryptographic verification.
 - WebSocket upgrades require one exact site `Origin`, including the configured port. Non-browser clients must send it. Bouncer UI uses external scripts under `script-src 'self'`; backend applications retain their own policy.
 - Images run as UID/GID `10001:10001` with `/data` as their writable working directory. Named volumes initialise with the image's ownership. Back up existing bind mounts, then grant this UID/GID ownership; no startup chown or root wrapper runs. A file capability permits ports 80/443; runtimes that strip capabilities need explicit bind capability or unprivileged listeners.
 - Gateway authentication has a 500-request/minute global ceiling, 4096 rate keys, 1024 pending challenges and 32 concurrent notification jobs per routing generation. Excess requests fail closed and excess notifications are dropped.

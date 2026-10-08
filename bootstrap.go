@@ -60,6 +60,7 @@ func bootstrapHandler(c *config.Config, sites *site.Registry) http.Handler {
 			http.NotFound(w, r)
 			return
 		}
+		// #nosec G710 -- registry validates HTTPS origin; RequestURI only supplies path/query, never authority.
 		http.Redirect(w, r, s.PublicOrigin+r.URL.RequestURI(), http.StatusMovedPermanently)
 	})
 	guarded := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

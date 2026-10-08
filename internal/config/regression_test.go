@@ -11,7 +11,7 @@ import (
 
 func regressionConfig(t *testing.T) *Config {
 	t.Helper()
-	c, err := Load(filepath.Join(t.TempDir(), "config.json"))
+	c, err := Load(filepath.Join(t.TempDir(), "config.yaml"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +189,7 @@ func TestEnrollmentTokenConcurrentConsumption(t *testing.T) {
 
 func TestRejectUnsafeSessionSettings(t *testing.T) {
 	for _, mutate := range []func(*Config){func(c *Config) { c.Session.File = c.Path() }, func(c *Config) { c.Session.File = "" }, func(c *Config) { c.Session.CookieName = "bad cookie" }, func(c *Config) { c.Session.TTLDays = 0 }} {
-		c, err := Load(filepath.Join(t.TempDir(), "bouncer.json"))
+		c, err := Load(filepath.Join(t.TempDir(), "bouncer.yaml"))
 		if err != nil {
 			t.Fatal(err)
 		}

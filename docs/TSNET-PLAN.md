@@ -20,7 +20,7 @@ Earlier proposals for one node, `server.tailscale.ingresses`, restart-only chang
 
 ## Upstream API and dependency
 
-Source review used Tailscale `v1.102.5`. The dependency is pinned and builds locally; its Go requirement is 1.26.6, reflected in go.mod, lint and container configuration.
+Source review used Tailscale `v1.102.5`. The dependency is pinned and builds locally; its Go requirement is 1.26.6; Bouncer now targets Go 1.27.1 for the module, lint tools and container.
 
 - `Server.Listen` returns tailnet TCP; `ListenTLS` returns tailnet TLS.
 - `ListenFunnel` returns TLS for Funnel and, unless restricted, tailnet traffic. MagicDNS, HTTPS and node/port Funnel permissions are account prerequisites.

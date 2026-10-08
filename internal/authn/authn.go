@@ -672,6 +672,7 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	if err == nil {
 		deleteErr = h.sess.Delete(cookie.Value)
 	}
+	// #nosec G124 -- deletion uses actual TLS or ingress-trusted HTTPS, matching cookie creation.
 	http.SetCookie(w, &http.Cookie{
 		Name:     h.cfg.Session.CookieName,
 		Value:    "",
@@ -1094,6 +1095,7 @@ func setNoStore(w http.ResponseWriter) {
 }
 
 func setSessionCookie(w http.ResponseWriter, name, value string, ttlDays int, secure bool) {
+	// #nosec G124 -- callers derive Secure from actual TLS or ingress-trusted HTTPS; local HTTP is intentionally supported.
 	http.SetCookie(w, &http.Cookie{
 		Name:     name,
 		Value:    value,

@@ -23,7 +23,7 @@ for i in $(seq 1 100); do
 done
 [[ "$ready" == 1 ]] || { engine_run logs "$name";exit 1; }
 [[ $(engine_run exec "$name" id -u) == 10001 ]]
-engine_run exec "$name" sh -c 'test -w /data && test -f /data/bouncer.json && test -w /data/bouncer.json && test -n "$(getcap /usr/local/bin/bouncer)"'
+engine_run exec "$name" sh -c 'test -w /data && test -f /data/bouncer.yaml && test -w /data/bouncer.yaml && test -n "$(getcap /usr/local/bin/bouncer)"'
 httpport=$(engine_run port "$name" 80/tcp | head -1 | sed 's/.*://')
 curl -sf --max-time 2 -H 'Host: bouncer.local' "http://127.0.0.1:$httpport/login" > /dev/null
 engine_run stop --time 10 "$name" > /dev/null

@@ -85,11 +85,11 @@ External Cloudflare remains a separate connector forwarding to a restricted loca
 
 ## Persistence and allocation management
 
-`bouncer.json` stores configuration, CA material, users and enrollment state; a separate configured session file stores sessions. Atomic writes use temp file, sync and rename with mode 0600. Paths relative to configuration are resolved consistently. Use one writer per config/session pair and preserve current state when editing files.
+`bouncer.yaml` stores configuration, CA material, users and enrollment state; a separate configured session file stores sessions. Atomic writes use temp file, sync and rename with mode 0600. Paths relative to configuration are resolved consistently. Use one writer per config/session pair and preserve current state when editing files.
 
 Proxy responses use pooled 32 KiB buffers, held for the response lifetime. GC can discard pool entries, and concurrent streams each need a buffer. Hostname resolution avoids unnecessary IP parsing and malformed host:port error allocations. See [allocation measurements](ALLOCATION-PASS-2026-10-08.md) for workload-specific results and limitations.
 
-Go 1.26.6 is the module/container minimum; allocation measurements used Go 1.27.1. Native amd64/arm64 packaging uses a non-root UID/GID 10001 with writable persistent `/data`. [AGENTS.md](../AGENTS.md) defines portable project-scoped cache/temp selection. Durable credentials, identities and deliverables stay outside that storage.
+Go 1.27.1 is the module/container minimum; allocation measurements used Go 1.27.1. Native amd64/arm64 packaging uses a non-root UID/GID 10001 with writable persistent `/data`. [AGENTS.md](../AGENTS.md) defines portable project-scoped cache/temp selection. Durable credentials, identities and deliverables stay outside that storage.
 
 ## Verification
 
