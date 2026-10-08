@@ -20,7 +20,11 @@ import (
 )
 
 // EnsureCA generates a root CA if one doesn't exist in the config, and saves it.
-func EnsureCA(cfg *config.Config) error {
+func EnsureCA(cfg *config.Config) error { return ensureCA(cfg, true) }
+
+// PrepareCA generates in-memory material without committing a reload candidate.
+func PrepareCA(cfg *config.Config) error { return ensureCA(cfg, false) }
+func ensureCA(cfg *config.Config, persist bool) error {
 	if kp := cfg.Server.TLS.CA; kp != nil && (kp.CertPem != "" || kp.KeyPem != "") {
 		_, _, err := validatedCA(kp)
 		return err
@@ -69,11 +73,18 @@ func EnsureCA(cfg *config.Config) error {
 	cfg.Server.TLS.CA.CertPem = string(certPEM)
 	cfg.Server.TLS.CA.KeyPem = string(keyPEM)
 
-	return cfg.Save()
+	if persist {
+		return cfg.Save()
+	}
+	return nil
 }
 
 // EnsureServerCert generates (or regenerates) a server certificate signed by the CA.
-func EnsureServerCert(cfg *config.Config) error {
+func EnsureServerCert(cfg *config.Config) error { return ensureServerCert(cfg, true) }
+
+// PrepareServerCert generates material without writing an uncommitted candidate.
+func PrepareServerCert(cfg *config.Config) error { return ensureServerCert(cfg, false) }
+func ensureServerCert(cfg *config.Config, persist bool) error {
 	if cfg.Server.TLS.CA == nil || cfg.Server.TLS.CA.CertPem == "" {
 		return fmt.Errorf("ca: no CA available")
 	}
@@ -150,7 +161,10 @@ func EnsureServerCert(cfg *config.Config) error {
 	cfg.Server.TLS.ServerCert.CertPem = string(certPEM)
 	cfg.Server.TLS.ServerCert.KeyPem = string(keyPEM)
 
-	return cfg.Save()
+	if persist {
+		return cfg.Save()
+	}
+	return nil
 }
 
 // CACertDER returns the CA certificate in DER format (for .cer download).

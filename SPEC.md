@@ -1,550 +1,91 @@
-# Bouncer Spec
+# Bouncer specification
 
-## Overview
-Bouncer is a Go-based reverse proxy that protects backend HTTP services using WebAuthn (passkeys). It supports **single-site** and **multi-site** (host-based) routing, with an **onboarding mode** to help users install trust (via iOS/macOS profiles) and register passkeys, then transparently forwards authenticated users to the backend service.
+Bouncer protects HTTP backends with WebAuthn passkeys and persistent, site- and credential-bound sessions. It routes by hostname or host:port without rewriting application paths.
 
-Configuration and user data live in a **single JSON file**. Sessions are persisted in a **separate JSON file** with a configurable TTL. A CLI switch enables onboarding mode.
+## Configuration and ingress
 
-## Goals
-- Simple, self-contained reverse proxy with WebAuthn authentication.
-- Onboarding flow for iOS/macOS trust + passkey registration.
-- Transparent pass-through once authenticated (no app changes required).
-- Single JSON file for config + user DB.
-- **Multi-site host-based routing** (one instance, multiple public origins/backends).
-- Optional **simplified mode** via Cloudflare Tunnel (no local TLS or profiles).
+`bouncer.json` contains configuration, TLS material and user credentials. `sessions.json` stores sessions separately. [INGRESSES.md](docs/INGRESSES.md) defines the ingress schema, defaults, validation and migration requirements.
 
-## Non‑Goals
-- Path-prefix routing or HTML/API URL rewriting. Multi-backend support is host-based via `sites[]`.
-- External DB dependencies.
-- Enterprise IAM features (SAML/OIDC, RBAC, SCIM).
+- `sites[]` defines stable IDs, public origins, RP IDs, backend URLs and host/IP aliases. Origins must be absolute HTTP(S) URLs without credentials, query or fragment; backend URLs must be absolute HTTP(S) URLs.
+- `ingresses[]` is required in existing configuration files and owns listeners, TLS, proxy trust and discovery. There is no legacy listener normalisation. Up to 32 entries are accepted; at least one must be enabled.
+- `local` supports `local-ca` or `off` TLS, explicit trusted proxy CIDRs and optional mDNS. A socket may allow several sites.
+- `tsnet` provides embedded Funnel TLS with one persistent node and one site per ingress. Ports are 443, 8443 or 10000. Identity directories must be separate, protected and persistent. Enrollment keys are referenced through environment-variable names.
+- mDNS is discovery attached to a local listener. It does not create browser DNS aliases.
+- New files use the built-in defaults: site `default`, local HTTPS on `:443`, HTTP trust bootstrap on `:80`, origin `https://bouncer.local` and backend `http://127.0.0.1:3000`. When `sites[]` is absent, server-level origin/backend fields supply the single default site; they do not define listeners.
 
----
+External Cloudflare Tunnel remains a separate connector. Configure its restricted local origin as a `local` ingress with TLS off and explicit proxy trust. No embedded cloudflared connector or implicit loopback trust is provided. The retained `server.cloudflare` field controls certificate-step presentation and certificate-route registration in the main router; listener security comes from the ingress.
 
-## Architecture
+## Authentication and enrollment
 
-```
-Client Browser
-   | HTTPS
-   v
-Bouncer (TLS + WebAuthn + Session)
-   | HTTP
-   v
-Backend Service (existing app)
-```
+Normal operation disables registration. Onboarding can be enabled in configuration or with `--onboarding`.
 
-Key components:
-- **HTTP(S) reverse proxy** (Go `net/http`, `httputil.ReverseProxy`).
-- **WebAuthn server** (Go library: `github.com/go-webauthn/webauthn`).
-- **Session manager** (secure httpOnly cookie, persisted to a separate `sessions.json` file with TTL).
-- **Static onboarding UI** served by Bouncer (vendored Preact/HTM, embedded via `embed.FS`).
-- **Config + user DB** stored in `bouncer.json`; sessions in `sessions.json`.
+- Passkey registration and login use site-specific RP IDs and exact public origins. Challenges are bounded, expiring, single-use and separated by flow.
+- Enrollment uses a cryptographically random 12-digit code issued on demand. Codes expire after 10 minutes and lock after 10 incorrect guesses per generation, including empty submissions. A persisted 100-failure budget spans expired generations.
+- One-time codes are consumed by an accepted registration-options request. Reusable codes retain the same expiry and failure limits. Startup and reload do not clear lockout or replace live codes; `rotateTokenOnStart` is retained metadata only.
+- A trusted operator can run `--reset-enrollment` while the service is stopped to reset lockout and print a fresh code. API responses and routine logs do not expose codes. Optional Pushover notifications can deliver them.
+- When enabled, local bypass uses verified client attribution and RFC1918, loopback or IPv6 ULA membership. It is always disabled on tsnet, including local-looking tailnet peers.
+- Rate and enrollment budgets are shared across listeners. Tailnet membership does not replace passkey authentication.
 
----
+## Sessions and persistence
 
-## Modes
+Sessions store ID, site ID, user ID, credential ID, creation time and last-seen time. Default TTL is seven days from creation. Each authenticated request verifies that the exact credential still exists for that user and site.
 
-### 1) Normal Mode (default)
-- Passkey **registration disabled**.
-- Only authenticated users (valid session cookie) can access the backend.
-- Unauthenticated users see a **login page** (passkey assertion).
+Cookies are HttpOnly, SameSite=Lax and Secure when actual TLS or a trusted proxy establishes HTTPS. Removing a credential blocks subsequent requests; established streams continue until disconnected. Sessions without a credential ID require fresh login.
 
-### 2) Onboarding Mode (`--onboarding`)
-- Registration enabled.
-- Enrollment requires a **one‑time twelve‑digit token**; local IP ranges (RFC1918 + loopback) bypass the token when `onboarding.localBypass` is `true` (default).
-- Token is **issued on demand** on the first registration attempt, **printed to logs** and optionally sent via Pushover; it is consumed after use.
-- Optional **Pushover alerts** can be sent on enrollment attempts (IP, UA, basic geo lookup).
-- Users without a valid session see **onboarding UI**:
-  - If TLS is not trusted (local CA use‑case): prompt to install the profile.
-  - Then prompt to **enter the one‑time 12‑digit token** and **create a passkey**.
-- After passkey creation, user is redirected to the backend.
+Configuration and session files use same-directory atomic writes with restrictive `0600` permissions. Session creation/deletion persists immediately; last-seen writes are batched. Startup and hourly cleanup prune expired sessions. CA material and tsnet identity survive restart. Use one writer per configuration/session pair; external edits must preserve current credentials and enrollment state.
 
-### 3) Cloudflare Tunnel Mode (`--cloudflare`)
-- Bouncer listens on **local HTTP only** (no TLS termination).
-- Cloudflare Tunnel provides the public HTTPS hostname + certs.
-- `rpID` and `publicOrigin` must be set to the **Cloudflare hostname** (not the local address).
-- Onboarding UI **skips certificate/profile installation** and goes directly to passkey registration/login.
-- Bouncer trusts `X-Forwarded-Proto` only from IPs listed in `server.trustedProxies` (loopback is auto-trusted in Cloudflare mode).
+## Request and trust boundaries
 
----
+- Sites resolve from Host/host:port, or `X-Forwarded-Host` only from explicitly trusted local-ingress proxies. Unknown or disallowed sites return 404.
+- tsnet rejects mismatched Host, port and conflicting TLS SNI. It never trusts forwarded client, host or scheme headers. Public client attribution comes from upstream `ipn.FunnelConn` metadata.
+- Forwarded client chains are evaluated right-to-left through trusted hops. Missing or malformed attribution cannot grant local bypass.
+- WebAuthn POST requests and WebSocket upgrades require the configured origin. Bouncer's session cookie is stripped before proxying; unrelated backend cookies remain.
+- HTTPS responses include HSTS. UI/auth responses use security headers and no-store caching. Header, body, challenge and rate-state limits constrain untrusted input.
 
-## Deployment Scenarios
+## HTTP surfaces
 
-### 1) Public HTTPS (Cloudflare Tunnel / Tailscale Funnel)
+| Route | Behaviour |
+|---|---|
+| `/login` | Passkey sign-in UI |
+| `/onboarding` | Trust/enrollment UI |
+| `/static/*` | Embedded client assets |
+| `POST /webauthn/register/options`, `/verify` | Onboarding-only registration |
+| `POST /webauthn/login/options`, `/verify` | Passkey authentication |
+| `POST /logout` | Remove session and clear cookie |
+| `/certs/rootCA.cer`, `/certs/rootCA.mobileconfig` | Local-CA trust downloads |
+| Other paths, including `/` | Authenticated backend proxy; unauthenticated requests redirect to login/onboarding |
 
-Use this when the public hostname is terminated by an external edge proxy.
+A local HTTP bootstrap ingress serves trust downloads and instructions only. It cannot register passkeys or authenticate. It requires an HTTPS public origin owned by a local-CA ingress and redirects other paths to that origin. Verify the CA SHA256 independently with `--fingerprint-CA` before installing trust.
 
-```mermaid
-flowchart LR
-  U[User Browser] -->|HTTPS| E[Cloudflare/Tailscale Edge]
-  E -->|HTTP + X-Forwarded-Proto| B[Bouncer]
-  B --> A[Backend App]
-```
+## TLS, proxying and discovery
 
-**Interaction flow**
-1. User visits `https://public.example.com/onboarding`.
-2. Bouncer issues a **one-time token** on demand (optional Pushover delivery). A trusted operator can explicitly reset and print a code while the service is stopped.
-3. User enters the token, completes WebAuthn registration, and receives a session cookie.
-4. Authenticated requests are forwarded to the backend.
+Local certificates use ECDSA P-256. The CA lasts 10 years; server certificates last up to one year, capped at CA expiry. Valid matching server certificates are reused until within 30 days of expiry. SANs include only local-CA sites. tsnet uses Tailscale-managed TLS without Bouncer CA wrapping.
 
-### 2) Local HTTPS (private domain + private CA)
+The standard reverse proxy preserves methods, bodies, queries and application paths; it supplies sanitised forwarding headers. SSE flushes and bidirectional WebSockets are supported. Servers use 5-second header, 15-second read and 60-second idle timeouts, a 1 MiB header limit and no write timeout. Response copy buffers are pooled for the lifetime of each response.
 
-Use this for LAN-only deployments where Bouncer terminates TLS.
+mDNS publishes DNS-SD records from enabled local discovery settings, using the actual ingress port. Unchanged records are reused across backend-only reloads. Discovery is not proof of browser hostname resolution or public reachability.
 
-```mermaid
-flowchart LR
-  U[User Browser] -->|HTTP| B[Bouncer]
-  U -->|HTTPS (after trust)| B
-  B --> A[Backend App]
+## Lifecycle and reload
+
+Startup validates the collection and stages all enabled endpoints before activation. Failure closes staged resources. SIGHUP prepares a candidate before publishing routing and policies; new listeners do not accept HTTP connections or perform TLS handshakes until commit. Failed reloads do not persist prepared certificates or token expiry.
+
+Authentication remains available during staging. A changed configuration file during preparation rejects the candidate; retry SIGHUP. Each request selects routing and trust from one generation. Unchanged listeners and streams survive reload; removed ingresses close their HTTP and hijacked connections and provider resources.
+
+Session storage/settings require restart. Changes conflicting with an active socket or node identity require removal and addition across two reloads. Persistent identity is not deleted on removal. tsnet readiness is bounded to 60 seconds after synchronous upstream Start; Start and ListenFunnel do not have a verified whole-operation timeout. Live Funnel acceptance requires separate authorised testing.
+
+## Commands and verification
+
+```sh
+./bouncer --config /data/bouncer.json --check-config
+./bouncer --config /data/bouncer.json --onboarding
+./bouncer --config /data/bouncer.json --fingerprint-CA
+# Service stopped; deliberate enrollment reset:
+./bouncer --config /data/bouncer.json --reset-enrollment
+# DB-IP enabled in configuration:
+./bouncer --config /data/bouncer.json --dbip-update
+kill -HUP <pid>
 ```
 
-**Interaction flow**
-1. User visits `http://bouncer.local/onboarding` to download the trust profile.
-2. After installing the CA, the user returns to `https://bouncer.local/onboarding`.
-3. Bouncer validates the token (or local bypass) and registers the passkey.
-4. Authenticated requests are forwarded to the backend.
+`--log-level` accepts debug, info, warn or error. Listener/backend/hostname/IP/Cloudflare CLI overrides are rejected; edit sites/ingresses instead. `--check-config` starts no listeners/nodes and resolves no secret values; filesystem checks resolve identity-path aliases.
 
----
-
-## Piclaw / Long-Lived Connection Proxying
-
-Bouncer is designed to protect apps such as Piclaw without URL rewriting:
-
-- Use **host-based routing** (`sites[]`) instead of path prefixes.
-- Preserve `X-Forwarded-Host`, `X-Forwarded-Proto`, and `X-Forwarded-For` for trusted upstream proxies.
-- Do not buffer proxied responses; Go's `httputil.ReverseProxy` is configured with a short flush interval.
-- Leave server write timeout disabled so Piclaw's `/sse/stream` and WebSocket upgrades can stay open.
-- WebSocket upgrades are passed through by the standard reverse proxy.
-
-This means a Piclaw instance can remain unaware of Bouncer as long as Piclaw is configured with:
-
-```env
-PICLAW_TRUST_PROXY=true
-PICLAW_WEB_EXTERNAL_URL=https://piclaw-instance.example.com
-```
-
----
-
-## LAN Port Aliases and mDNS
-
-A site may set `listen` to bind an additional HTTP/HTTPS listener for that site. This is intended for no-DNS LAN fallbacks where multiple Piclaw backends are reached by IP plus port:
-
-```json
-{
-  "id": "smith-lan",
-  "publicOrigin": "https://192.168.1.50:8441",
-  "rpID": "192.168.1.50",
-  "backend": "http://127.0.0.1:8081",
-  "hostnames": ["192.168.1.50"],
-  "ipAddresses": ["192.168.1.50"],
-  "listen": ":8441"
-}
-```
-
-When `server.mdns.enabled` is true, Bouncer publishes one DNS-SD service announcement per site:
-
-```json
-"mdns": {
-  "enabled": true,
-  "service": "_https._tcp",
-  "domain": "local.",
-  "instancePrefix": "Bouncer"
-}
-```
-
-Bouncer can announce multiple mDNS service instances, but this is not the same thing as browser DNS aliases. Bonjour-aware clients can discover the advertised services and ports; ordinary browsers still need a URL such as `https://192.168.1.50:8441` unless the OS provides a local hostname/alias.
-
----
-
-## Hot Reload
-
-Send `SIGHUP` to reload `bouncer.json` without dropping the listener:
-
-```bash
-kill -HUP $(pidof bouncer)
-```
-
-Reloadable:
-
-- `sites[]` additions/removals/hostname changes
-- site `backend` URLs
-- `trustedProxies`
-- onboarding settings
-- mDNS service announcements
-- local TLS SAN/certificate material for newly-added hostnames
-
-Not reloadable without restart:
-
-- listen address (`server.listen`)
-- per-site `listen` port aliases (new listeners require restart)
-- Cloudflare/local-TLS mode (`server.cloudflare`)
-
-Existing proxied SSE/WebSocket connections keep using their already-selected backend. New requests use the reloaded routing/auth state.
-
----
-
-## CLI
-
-```
-Usage: bouncer [flags]
-
-Flags:
-  --config <path>         Path to JSON config (default: ./bouncer.json)
-  --listen <addr>         Listen address (default: :443 for TLS, :8080 for HTTP)
-  --backend <url>         Backend HTTP URL (e.g., http://localhost:3000)
-  --hostname <host>       Override DNS name for TLS/WebAuthn (may be repeated)
-  --ip <addr>             Override IP SAN for TLS/WebAuthn (may be repeated)
-  --onboarding            Enable onboarding mode (allow registration)
-  --cloudflare            Enable Cloudflare Tunnel mode (no local TLS/profile flow)
-  --dbip-update           Download/update DB-IP Lite database and exit
-  --fingerprint-CA        Print existing CA certificate SHA256 through a trusted console
-  --reset-enrollment      Reset enrollment lockout, print a fresh code and exit
-  --log-level <level>     info|debug|warn|error
-
-Note: CLI overrides for `--backend`, `--hostname`, and `--ip` apply only in single-site mode. When `sites` is configured, these flags are ignored.
-```
-
----
-
-## Config JSON (Single File)
-
-**File:** `bouncer.json`
-
-```json
-{
-  "server": {
-    "listen": ":443",
-    "publicOrigin": "https://bouncer.local",
-    "rpID": "bouncer.local",
-    "backend": "http://127.0.0.1:3000",
-    "hostnames": ["bouncer.local"],
-    "ipAddresses": ["192.168.1.50"],
-    "trustedProxies": [],
-    "tls": {
-      "ca": {
-        "certPem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
-        "keyPem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
-      },
-      "serverCert": {
-        "certPem": "-----BEGIN CERTIFICATE-----\n...\n-----END CERTIFICATE-----",
-        "keyPem": "-----BEGIN PRIVATE KEY-----\n...\n-----END PRIVATE KEY-----"
-      }
-    },
-    "cloudflare": false
-  },
-  "sites": [
-    {
-      "id": "app-a",
-      "publicOrigin": "https://a.example.com",
-      "rpID": "a.example.com",
-      "backend": "http://127.0.0.1:3001",
-      "hostnames": ["a.example.com"],
-      "ipAddresses": ["192.168.1.10"]
-    },
-    {
-      "id": "app-b",
-      "publicOrigin": "https://b.example.com",
-      "rpID": "b.example.com",
-      "backend": "http://127.0.0.1:3002",
-      "hostnames": ["b.example.com"],
-      "ipAddresses": ["192.168.1.11"]
-    }
-  ],
-  "session": {
-    "ttlDays": 7,
-    "cookieName": "bouncer_session",
-    "file": "sessions.json"
-  },
-  "onboarding": {
-    "enabled": false,
-    "token": "",
-    "rotateTokenOnStart": true,
-    "oneTimeToken": true,
-    "localBypass": true,
-    "profileUrl": "/certs/rootCA.mobileconfig",
-    "macCertUrl": "/certs/rootCA.cer",
-    "instructions": {
-      "ios": [
-        "Install the profile",
-        "Enable full trust in Certificate Trust Settings"
-      ]
-    },
-    "pushover": {
-      "enabled": false,
-      "apiToken": "",
-      "userKey": "",
-      "device": "",
-      "sound": "",
-      "timeoutSeconds": 3
-    },
-    "geoip": {
-      "enabled": true,
-      "timeoutSeconds": 2,
-      "cacheTtlSeconds": 3600,
-      "preferCloudflareHeaders": true,
-      "dbip": {
-        "enabled": true,
-        "databasePath": "dbip-city-lite.sqlite",
-        "autoUpdate": true,
-        "updateIntervalHours": 24,
-        "updatePageUrl": "https://db-ip.com/db/download/ip-to-city-lite",
-        "updateUrl": "",
-        "downloadTimeoutSeconds": 30
-      }
-    }
-  },
-  "users": [
-    {
-      "id": "user-1",
-      "site": "app-a",
-      "displayName": "Alice",
-      "name": "alice@example.com",
-      "credentials": [
-        {
-          "id": "base64url-credential-id",
-          "publicKey": "base64url-public-key",
-          "signCount": 12,
-          "transports": ["internal"],
-          "createdAt": "2026-02-28T15:00:00Z"
-        }
-      ]
-    }
-  ]
-}
-```
-
-### Notes
-- `publicOrigin` must match the hostname used by browsers.
-- `rpID` should be the eTLD+1 or host portion of `publicOrigin`. In Cloudflare mode, this is the **Cloudflare hostname**, not the local address.
-- `hostnames`/`ipAddresses` define TLS SANs; they can be set in config or overridden via CLI.
-- `trustedProxies`: CIDR list. `X-Forwarded-*` headers are only trusted from these IPs. Empty = trust nothing (direct mode). In Cloudflare mode, loopback is auto-trusted; add Cloudflare ranges if you terminate upstream.
-- In Cloudflare mode, `tls` may be omitted.
-- If `sites` is set, each site defines its own `publicOrigin`, `rpID`, and `backend`. CLI overrides for `--backend`, `--hostname`, and `--ip` are ignored in multi-site mode.
-- `session.ttlDays`: sessions expire after this many days (default 7); user must re‑authenticate with passkey.
-- `session.file`: path to the sessions JSON file (default `sessions.json`, relative to config dir).
-- `onboarding.oneTimeToken`: if `true`, tokens are issued on demand and consumed after a successful registration options request (default `true`).
-- `onboarding.rotateTokenOnStart`: if `true`, a new 12‑digit token is generated on each startup (old token discarded). Ignored when `oneTimeToken` is `true`.
-- `onboarding.localBypass`: if `true`, requests from RFC1918 + loopback IPs skip the token requirement.
-- `onboarding.geoip.preferCloudflareHeaders`: if `true`, Cloudflare geolocation headers are used first (from trusted proxies), falling back to DB-IP Lite or an optional external geoip URL if configured.
-- `onboarding.geoip.dbip.enabled`: enable the local DB-IP Lite SQLite database provider.
-- `onboarding.geoip.dbip.databasePath`: path to the SQLite database (relative to `bouncer.json` by default).
-- `onboarding.geoip.dbip.autoUpdate`: if `true`, refresh the DB-IP Lite database automatically.
-- `onboarding.geoip.dbip.updateIntervalHours`: how often to check for updates (default 24h).
-- `onboarding.geoip.dbip.updatePageUrl`: download page used to resolve the latest CSV URL.
-- `onboarding.geoip.dbip.updateUrl`: optional direct URL to the CSV gzip (overrides `updatePageUrl`).
-- `onboarding.geoip.dbip.downloadTimeoutSeconds`: download timeout in seconds.
-- DB-IP Lite is licensed under CC BY 4.0 and **requires attribution** to db-ip.com on pages that display or use the data.
-- `users` holds registered WebAuthn credentials. In multi-site mode, each user is tagged with `site` (defaults to `default` for legacy entries).
-
----
-
-## WebAuthn Flow
-
-### Registration (Onboarding Mode only)
-1. User visits `/onboarding`.
-2. If required, user verifies the certificate SHA256 through an independent trusted channel before installing the trust profile/cert.
-3. User enters the **one‑time twelve‑digit enrollment token** (issued on demand).
-   - If `onboarding.localBypass` is `true` and request is from RFC1918/loopback, token is not required.
-4. Client calls `POST /webauthn/register/options` (token included).
-5. Server returns `PublicKeyCredentialCreationOptions`.
-6. Client creates credential (`navigator.credentials.create`).
-7. Client sends result to `POST /webauthn/register/verify`.
-8. Server verifies and stores credential under the user.
-9. Server issues session cookie and redirects to backend.
-
-### Login (Normal + Onboarding)
-1. Client calls `POST /webauthn/login/options`.
-2. Server returns `PublicKeyCredentialRequestOptions`.
-3. Client uses `navigator.credentials.get`.
-4. Client sends result to `POST /webauthn/login/verify`.
-5. Server verifies and issues session cookie.
-
-### Session
-- Cookie: `bouncer_session` (httpOnly, secure, SameSite=Lax).
-- **Persisted** in a separate `sessions.json` file (configurable path).
-- Each session record stores: session ID, site ID, user ID, creation time, last‑seen time.
-- **TTL**: sessions expire after `session.ttlDays` (default **7 days**) from creation. Expired sessions require a fresh passkey login.
-- Cleanup: expired sessions are pruned on startup and periodically (e.g., hourly).
-- Atomic writes: write to temp file, fsync, rename (same strategy as `bouncer.json`).
-
----
-
-## HTTP Routes
-
-### UI
-- `GET /` → landing page (unauthenticated entry point)
-- `GET /login` → login page (passkey sign-in)
-- `GET /onboarding` → onboarding page (profile + passkey creation)
-
-### WebAuthn API
-- `POST /webauthn/register/options`
-- `POST /webauthn/register/verify`
-- `POST /webauthn/login/options`
-- `POST /webauthn/login/verify`
-- `POST /logout`
-
-### Cert/Profiles (local TLS mode only)
-- `GET /certs/rootCA.mobileconfig` — served over **HTTP or HTTPS** (profile must be downloadable before trust is established).
-- `GET /certs/rootCA.cer` — served over **HTTP or HTTPS**.
-
-### Proxy
-- All other paths → forwarded to backend **only if authenticated**.
-- Unauthenticated `GET /` requests → landing page; other requests → redirect to `/login` or `/onboarding`.
-
----
-
-## Reverse Proxy Behavior
-- Preserve method, headers, body, query string.
-- Add standard proxy headers:
-  - `X-Forwarded-For`, `X-Forwarded-Proto`, `X-Forwarded-Host`.
-- In multi-site mode, route by `Host` (or `X-Forwarded-Host` from trusted proxies).
-- Optional allowlist of headers to strip (e.g., `Authorization`).
-
----
-
-## TLS + Certificates
-
-### Local TLS Mode (Built‑in CA, no mkcert)
-- On first run (or when `tls.ca` is empty), Bouncer generates a **root CA** and persists it in the JSON config.
-- Bouncer mints a **server certificate** signed by that CA using `hostnames` + `ipAddresses` as SANs.
-- TLS uses the generated server cert/key (stored in JSON or regenerated on startup).
-- Bouncer serves the CA as `.cer` and a **mobileconfig profile** for iOS/macOS.
-- **Profile signing is not required** (unsigned profile is acceptable, with extra warnings).
-
-### Cloudflare Tunnel Mode (Simplified)
-- Cloudflare handles TLS and public origin.
-- Bouncer runs HTTP locally; trusts `X-Forwarded-Proto` **only from `trustedProxies`** IPs.
-- Onboarding UI skips profile/cert steps and focuses on passkey setup.
-- `rpID` and `publicOrigin` must be the Cloudflare hostname.
-
----
-
-## Built‑in CA Details (Go)
-- **Key type**: ECDSA P‑256 (or RSA‑2048 if you prefer broader legacy support).
-- **Root CA cert**:
-  - `IsCA = true`, `BasicConstraintsValid = true`
-  - `KeyUsage`: `CertSign | CRLSign | DigitalSignature`
-  - Validity: e.g., 5–10 years
-- **Server cert**:
-  - `KeyUsage`: `DigitalSignature | KeyEncipherment`
-  - `ExtKeyUsage`: `ServerAuth`
-  - SANs: `hostnames` + `ipAddresses`
-  - Validity: e.g., 1 year
-- **Serials**: 128‑bit random.
-- **Persistence**: store CA PEM in JSON; re‑issue server cert if SANs change.
-
-### iOS/macOS Profile (unsigned)
-- Serve a `.mobileconfig` with `PayloadType = "Configuration"` containing a **root CA payload**:
-  - Root CA payload `PayloadType`: `com.apple.security.root`
-  - `PayloadContent`: DER‑encoded certificate bytes (base64)
-- Also serve `rootCA.cer` (DER) for macOS import.
-- Unsigned profiles show extra warnings but are acceptable for local onboarding.
-
-#### Example `.mobileconfig` (minimal, unsigned)
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>PayloadType</key>
-  <string>Configuration</string>
-  <key>PayloadVersion</key>
-  <integer>1</integer>
-  <key>PayloadIdentifier</key>
-  <string>local.bouncer.rootca</string>
-  <key>PayloadUUID</key>
-  <string>REPLACE-WITH-UUID</string>
-  <key>PayloadDisplayName</key>
-  <string>Bouncer Local CA</string>
-  <key>PayloadDescription</key>
-  <string>Installs the Bouncer local root CA so your device trusts the local HTTPS server.</string>
-  <key>PayloadOrganization</key>
-  <string>Bouncer</string>
-  <key>PayloadContent</key>
-  <array>
-    <dict>
-      <key>PayloadType</key>
-      <string>com.apple.security.root</string>
-      <key>PayloadVersion</key>
-      <integer>1</integer>
-      <key>PayloadIdentifier</key>
-      <string>local.bouncer.rootca.payload</string>
-      <key>PayloadUUID</key>
-      <string>REPLACE-WITH-UUID</string>
-      <key>PayloadDisplayName</key>
-      <string>Bouncer Root CA</string>
-      <key>PayloadContent</key>
-      <data>
-      BASE64_DER_CERT_HERE
-      </data>
-    </dict>
-  </array>
-</dict>
-</plist>
-```
-
----
-
-## Onboarding UX Requirements
-- Detect if browser is iOS/macOS and show trust instructions.
-- Provide clear buttons/inputs:
-  - “Install iOS/macOS profile”
-  - “Download macOS cert (optional)”
-  - **Enrollment token input (12 digits)**
-  - “Create passkey”
-  - “Sign in with passkey”
-- If `onboarding.localBypass` is `true` and request is from a local IP, token input is hidden.
-- After passkey success, redirect to original requested URL.
-
----
-
-## Security Considerations
-- Enforce HTTPS for all routes except `/certs/*` in local TLS mode (profile must be downloadable before trust is established).
-- Require same-origin for WebAuthn endpoints.
-- Validate `Origin` and `RP ID` strictly; in Cloudflare mode these must match the tunnel hostname.
-- Rate limit WebAuthn attempts (basic IP-based throttling).
-- Sessions are bound to the resolved `site` to prevent cross-site reuse.
-- Session cookies are marked `Secure` when the request is HTTPS or when a trusted proxy reports `X-Forwarded-Proto: https`.
-- HSTS is emitted on HTTPS responses.
-- WebAuthn responses use `Cache-Control: no-store`.
-- HTTP servers enforce sane timeouts and max header size to mitigate slowloris-style attacks.
-- Protect `bouncer.json` and `sessions.json` with restrictive file permissions (0600).
-- Enrollment token is **12 digits**, generated via `crypto/rand`.
-- Token is **issued on demand**, optionally sent via Pushover or retrieved by the trusted reset command, and never exposed via API.
-- `onboarding.localBypass`: when enabled, only RFC1918 (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`) + loopback (`127.0.0.0/8`, `::1`) skip the token.
-- `trustedProxies`: `X-Forwarded-*` headers are stripped unless `RemoteAddr` matches a trusted proxy CIDR. Prevents origin/proto spoofing.
-
----
-
-## Persistence Strategy
-- **`bouncer.json`**: config + user DB. Loaded at startup; written back on credential changes. Atomic writes (temp + fsync + rename).
-- **`sessions.json`**: session records. Separate file so session churn doesn't rewrite the config. Atomic writes. Pruned of expired entries on startup and periodically.
-- CA key/cert PEM persisted in `bouncer.json` so trust survives restarts.
-- Enrollment token persisted in `bouncer.json` when issued; cleared after use when `oneTimeToken` is `true`. `rotateTokenOnStart` is legacy metadata; startup never resets or replaces a live code or clears lockout. Use `--reset-enrollment` for deliberate rotation.
-
----
-
-## Implementation Notes (Go)
-- HTTP server with `net/http`.
-- Reverse proxy with `httputil.ReverseProxy` and `Rewrite`.
-- WebAuthn using `github.com/go-webauthn/webauthn`.
-- Static UI (vanilla JS) embedded via `embed.FS`.
-- JSON persistence using `encoding/json` + atomic file writes.
-- CA/cert generation using `crypto/x509`, `crypto/ecdsa`, `crypto/rand`, and `encoding/pem`.
-- Token generation: 12‑digit via `crypto/rand` (uniform 000000000000–999999999999).
-- Mobileconfig generation: minimal XML template with UUIDs generated via `crypto/rand`.
-- Local IP detection: parse `RemoteAddr` (or `X-Forwarded-For` when sender is trusted) and match against RFC1918/loopback CIDRs.
-- Session file: loaded into in-memory map on startup; flushed to disk on changes + periodic sync.
-- Token validation: checked in `POST /webauthn/register/options` before issuing a challenge.
-
----
-
-## Future Enhancements
-- Admin UI for user management.
-- Enrollment tokens for adding users in normal mode.
-- Audit log to file.
-- mTLS for backend.
-- Optional OIDC upstream integration.
-
-## October 2026 updates
-
-See [the audit](docs/AUDIT-2026-10.md) for fixes, verification and limits. One-time enrollment stores `tokenExpiresAt` and `tokenAttempts` (10 minutes, 10 incorrect guesses (including empty submissions)). Credentials store `backupEligible` and `backupState`. Optional `server.httpListen` selects the restart-only local HTTP bootstrap listener. Session settings and all listener addresses require restart. Test runs must use the allocation-profiling Make targets defined in [AGENTS.md](AGENTS.md).
+Use Make targets from [AGENTS.md](AGENTS.md) for builds, lint, uncached tests and benchmarks. Routine tests are unprofiled; explicit pre-release captures use `make profile`. See [architecture](docs/ARCHITECTURE.md), [ingress audit](docs/INGRESS-AUDIT-2026-10-07.md) and [allocation measurements](docs/ALLOCATION-PASS-2026-10-08.md) for implementation and verification evidence. No external IAM, path-prefix rewriting, private-only tsnet transport or embedded Cloudflare connector is implemented.

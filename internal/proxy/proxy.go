@@ -9,10 +9,25 @@ import (
 	"net/http/httputil"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/rcarmo/bouncer/internal/ingress"
 	"github.com/rcarmo/bouncer/internal/localip"
 )
+
+// Buffers contain response bytes; the pool never owns request headers or auth
+// state. ReverseProxy only forwards the bytes read for the current response.
+var responseBuffers = sync.Pool{New: func() any { return new([32 * 1024]byte) }}
+
+type responseBufferPool struct{}
+
+func (responseBufferPool) Get() []byte { return responseBuffers.Get().(*[32 * 1024]byte)[:] }
+func (responseBufferPool) Put(buf []byte) {
+	if cap(buf) == 32*1024 {
+		responseBuffers.Put((*[32 * 1024]byte)(buf[:32*1024]))
+	}
+}
 
 // New creates a reverse proxy to the backend URL.
 // It adds X-Forwarded-* headers and strips them from untrusted sources.
@@ -30,7 +45,8 @@ func New(backendURL string, trusted []*net.IPNet) (*httputil.ReverseProxy, error
 	transport.ForceAttemptHTTP2 = false
 
 	proxy := &httputil.ReverseProxy{
-		Transport: transport,
+		Transport:  transport,
+		BufferPool: responseBufferPool{},
 		// Flush frequently so EventSource/SSE streams reach the browser without
 		// buffering. WebSocket upgrades are passed through by ReverseProxy.
 		FlushInterval: 100 * time.Millisecond,
@@ -43,11 +59,11 @@ func New(backendURL string, trusted []*net.IPNet) (*httputil.ReverseProxy, error
 			for _, header := range []string{"CF-Connecting-IP", "True-Client-IP", "X-Real-IP"} {
 				r.Out.Header.Del(header)
 			}
-			if clientIP != nil && localip.IsTrustedProxy(clientIP, trusted) {
+			if clientIP != nil && localip.IsTrustedProxy(clientIP, ingress.Trusted(r.In, trusted)) {
 				// Rewrite removes forwarded headers before calling us. SetXForwarded
 				// alone would discard the original client, public host and HTTPS scheme.
 				r.SetXForwarded()
-				if original := localip.ClientIPFromRequest(r.In, trusted); original != nil {
+				if original := localip.ClientIPFromRequest(r.In, ingress.Trusted(r.In, trusted)); original != nil {
 					r.Out.Header.Set("X-Forwarded-For", original.String()+", "+clientIP.String())
 				}
 				if host := r.In.Header.Get("X-Forwarded-Host"); host != "" && !strings.Contains(host, ",") {

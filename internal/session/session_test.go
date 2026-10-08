@@ -228,3 +228,33 @@ func TestLoadCorruptedFile(t *testing.T) {
 		t.Error("expected error for corrupted file")
 	}
 }
+
+func TestLastSeenSecondPrecision(t *testing.T) {
+	store, e := NewStore(filepath.Join(t.TempDir(), "sessions.json"), 7)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer store.Stop()
+	sess, e := store.Create("default", "user", "credential")
+	if e != nil {
+		t.Fatal(e)
+	}
+	store.mu.Lock()
+	store.sessions[sess].LastSeen = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	store.mu.Unlock()
+	before := time.Now().UTC().Truncate(time.Second)
+	got := store.Get(sess)
+	if got == nil {
+		t.Fatal("missing session")
+	}
+	seen, e := time.Parse(time.RFC3339, got.LastSeen)
+	if e != nil || seen.Before(before) || seen.After(time.Now().UTC()) {
+		t.Fatalf("invalid lastSeen %q: %v", got.LastSeen, e)
+	}
+	// Returned snapshots remain independent from persistent state.
+	got.LastSeen = "changed"
+	again := store.Get(sess)
+	if again == nil || again.LastSeen == "changed" {
+		t.Fatal("caller mutated store")
+	}
+}

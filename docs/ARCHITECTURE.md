@@ -1,252 +1,98 @@
-# Architecture
+# Bouncer architecture
 
-## Overview
+Bouncer uses one shared authentication/session pipeline behind a collection of local and embedded tsnet ingress endpoints. Sites define routing and credential scope; ingresses define network access, TLS, trust and lifecycle.
 
-Bouncer is structured as a standard Go project with internal packages, an embedded web UI, and a single `main.go` entry point.
+## Source layout
 
-```
-bouncer/
-├── main.go                 # Entry point: CLI, routing, server startup
-├── go.mod / go.sum
-├── Makefile
-├── Dockerfile
-├── SPEC.md                 # Full specification
-├── internal/
-│   ├── atomicfile/         # Atomic file writes (temp + fsync + rename)
-│   ├── authn/              # WebAuthn registration + login handlers
-│   ├── ca/                 # Built-in CA, server cert, mobileconfig generation
-│   ├── config/             # Config types, JSON persistence, user CRUD
-│   ├── localip/            # RFC1918/loopback detection, trusted proxy logic
-│   ├── mdns/               # Optional Bonjour/mDNS service announcements
-│   ├── notify/             # GeoIP providers + Pushover alerts
-│   ├── proxy/              # Reverse proxy with X-Forwarded-* headers
-│   ├── session/            # File-backed session store with TTL + cleanup
-│   ├── site/               # Host + host:port site registry (multi-site routing)
-│   └── token/              # 12-digit enrollment token generation
-└── web/
-    ├── embed.go            # embed.FS for static files
-    ├── landing.html        # Unauthenticated landing page
-    ├── login.html          # Passkey login page
-    └── onboarding.html     # Onboarding page (trust + passkey creation)
-```
-
-## Package Dependency Graph
-
-```
-main.go
-├── config          (load/save bouncer.json)
-├── ca              (generate CA + server cert, mobileconfig)
-│   └── config
-├── session         (file-backed sessions)
-│   └── atomicfile
-├── site            (host-based site registry)
-│   ├── config
-│   └── localip
-├── authn           (WebAuthn handlers)
-│   ├── config
-│   ├── session
-│   ├── site
-│   ├── localip
-│   └── go-webauthn/webauthn (external)
-├── proxy           (reverse proxy)
-│   └── localip
-├── mdns            (DNS-SD/mDNS service publishing)
-│   ├── config
-│   └── zeroconf (external)
-├── notify          (GeoIP providers + Pushover)
-│   └── config
-├── token           (enrollment token)
-├── localip         (IP detection)
-└── web             (embedded HTML)
-```
-
-## Deployment Scenarios
-
-### 1) Public HTTPS (Cloudflare Tunnel / Tailscale Funnel)
-
-**When to use:** you have a public hostname and want zero local TLS setup.
-
-```mermaid
-sequenceDiagram
-  participant U as User Browser
-  participant E as Cloudflare/Tailscale Edge
-  participant B as Bouncer
-  participant A as Backend App
-
-  U->>E: https://public.example.com/onboarding
-  E->>B: HTTP (X-Forwarded-Proto: https)
-  B-->>U: Onboarding UI (no cert step)
-
-  Note over U,B: User starts registration
-  U->>E: POST /webauthn/register/options (token)
-  E->>B: POST /webauthn/register/options
-  B->>B: Issue one-time token if needed
-  B-->>U: Challenge
-
-  U->>E: POST /webauthn/register/verify
-  E->>B: POST /webauthn/register/verify
-  B-->>U: Session cookie
-
-  U->>E: GET /
-  E->>B: GET /
-  B->>A: Forward
-  A-->>U: App content
-```
-
-**Interaction flow**
-1. User hits `/onboarding` on the public HTTPS hostname.
-2. Bouncer issues a one-time token on the first registration attempt (logs + Pushover).
-3. User enters the token and completes WebAuthn registration.
-4. Session cookie is set and the request is forwarded to the backend.
-
-### 2) Local HTTPS (private domain + private CA)
-
-**When to use:** you have a local hostname and want LAN-only access.
-
-```mermaid
-sequenceDiagram
-  participant U as User Browser
-  participant B as Bouncer
-  participant A as Backend App
-
-  U->>B: http://bouncer.local/onboarding
-  B-->>U: Trust profile links
-  U->>B: GET /certs/rootCA.mobileconfig
-  B-->>U: Profile download
-  Note over U: Install profile and trust CA
-
-  U->>B: https://bouncer.local/onboarding
-  B-->>U: Onboarding UI
-  U->>B: POST /webauthn/register/options (token or local bypass)
-  B-->>U: Challenge
-  U->>B: POST /webauthn/register/verify
-  B-->>U: Session cookie
-
-  U->>B: GET /
-  B->>A: Forward
-  A-->>U: App content
-```
-
-**Interaction flow**
-1. User visits `/onboarding` over HTTP to fetch the trust profile.
-2. After trusting the CA, the user returns via HTTPS and registers a passkey.
-3. Bouncer validates the token (or local bypass) and issues a session.
-4. Authenticated requests are forwarded to the backend.
-
-## Data Flow
-
-### Normal Mode (authenticated request)
-
-```
-Browser → HTTPS → Bouncer
-  0. Resolve site by Host / host:port / X-Forwarded-Host (trusted proxies only)
-  1. Check session cookie (must match resolved site)
-  2. Valid? → forward to site backend via reverse proxy
-  3. Invalid/missing? → redirect to /login
-```
-
-### LAN port aliases
-
-For no-DNS LAN deployments, a site may define a `listen` port. The registry
-then maps the same host/IP plus different ports to different sites:
-
-```
-https://192.168.1.50:8441 → site smith → http://127.0.0.1:8081
-https://192.168.1.50:8442 → site jones → http://127.0.0.1:8082
-```
-
-This avoids path-prefix rewriting and keeps Piclaw's root-relative API, SSE,
-static asset, terminal, and VNC URLs intact.
-### Onboarding Mode (new user)
-
-```
-Browser → HTTP/HTTPS → Bouncer
-  1. GET /onboarding → serve onboarding page
-  2. User installs .mobileconfig (local TLS only)
-  3. User enters one-time 12-digit token (issued on demand; skipped for local IPs)
-  4. POST /webauthn/register/options → server returns challenge
-  5. Browser creates credential (navigator.credentials.create)
-  6. POST /webauthn/register/verify → server verifies + saves user
-  7. Session cookie set → redirect to backend
-```
-
-### Login (returning user)
-
-```
-Browser → HTTPS → Bouncer
-  1. GET /login → serve login page
-  2. POST /webauthn/login/options → server returns challenge
-  3. Browser asserts credential (navigator.credentials.get)
-  4. POST /webauthn/login/verify → server verifies
-  5. Session cookie set → redirect to backend
-```
-
-## Persistence
-
-Two files:
-
-| File | Contents | Writes |
-|---|---|---|
-| `bouncer.json` | Config, TLS CA/cert PEM, users + credentials | On user registration, sign count update |
-| `sessions.json` | Active sessions (ID, user, timestamps) | On login, logout, periodic cleanup |
-
-Both use atomic writes (temp file → fsync → rename) to prevent corruption.
-
-## mDNS / Bonjour Architecture
-
-When `server.mdns.enabled` is true, Bouncer publishes one DNS-SD service
-announcement per site using the configured service type (default `_https._tcp`)
-and domain (`local.`). The TXT record includes the site id, public origin, and
-backend URL for discovery tools.
-
-Important limitation: this is service discovery, not wildcard DNS. Bouncer can
-announce multiple service instances, but ordinary browsers will not necessarily
-resolve multiple arbitrary aliases such as `smith.local` and `jones.local` unless
-the operating system/network stack provides hostname alias support. For reliable
-browser access without LAN DNS, use the advertised URLs or explicit IP+port
-bookmarks.
-
-## TLS Architecture
-
-### Local TLS Mode
-
-```
-Bouncer
-├── Generates root CA (ECDSA P-256, 10-year validity)
-├── Generates server cert signed by CA (1-year, SANs from config)
-├── Persists both in bouncer.json
-├── Serves .mobileconfig + .cer over HTTP (port 80)
-└── Serves everything else over HTTPS (port 443)
-```
-
-### Cloudflare Tunnel Mode
-
-```
-Cloudflare Edge
-├── Terminates TLS
-├── Forwards to Bouncer over HTTP
-└── Sets X-Forwarded-Proto: https
-
-Bouncer
-├── Listens HTTP only
-├── Trusts X-Forwarded-* only from trustedProxies CIDRs
-└── Skips CA/cert generation entirely
-```
-
-## Security Boundaries
-
-- **Session cookie**: httpOnly, Secure, SameSite=Lax. 7-day TTL (configurable).
-- **WebAuthn challenges**: stored in-memory, expire after 5 minutes.
-- **Enrollment token**: one-time 12-digit code issued on demand, optionally sent via Pushover or retrieved by the trusted reset command, never exposed via API.
-- **Trusted proxies**: X-Forwarded-* headers stripped unless RemoteAddr matches CIDR list.
-- **File permissions**: bouncer.json and sessions.json written with mode 0600.
-
-## External Dependencies
-
-| Dependency | Purpose |
+| Surface | Responsibility |
 |---|---|
-| `github.com/go-webauthn/webauthn` | WebAuthn server-side logic |
-| `github.com/grandcat/zeroconf` | DNS-SD/mDNS service announcements |
-| `github.com/fxamacker/cbor/v2` | CBOR decoding (transitive via webauthn) |
+| `main.go` | Startup, generation publication, SIGHUP and shutdown |
+| `ingresses.go` | Listener adapters, local-only SAN selection, mDNS reuse |
+| `router.go`, `bootstrap.go` | Authenticated routing and separate trust bootstrap |
+| `internal/ingress` | Validation, endpoint manager, request policy, tsnet/Funnel lifecycle |
+| `internal/config` | Configuration, credential snapshots/membership and durable enrollment state |
+| `internal/authn` | Site-specific WebAuthn, challenges, shared rate limits and enrollment |
+| `internal/site` | Host/host:port registry and ingress site restrictions |
+| `internal/session` | Persistent, credential-bound sessions and expiry |
+| `internal/proxy` | ReverseProxy, sanitised forwarding and pooled response buffers |
+| `internal/ca` | Local certificates and Apple trust profile |
+| `internal/mdns` | Local DNS-SD service announcements |
+| `internal/localip`, `internal/token` | Client attribution and cryptographic enrollment codes |
+| `internal/notify` | Pushover, GeoIP providers, bounded caches and DB-IP updates |
+| `internal/atomicfile` | Same-directory atomic persistence |
+| `web/` | Embedded Preact/HTM UI, handlers and vendored assets |
+| `scripts/`, `Makefile` | Build/test/browser/container flows and explicit profiling |
 
-Core proxy/TLS/config functionality otherwise uses Go stdlib (`crypto/x509`, `crypto/ecdsa`, `net/http`, `encoding/json`, etc.).
+The production binary embeds its client assets. There is no frontend build server or runtime Node dependency. Bun and Playwright are development test dependencies.
+
+## Request path
+
+```text
+local TLS / local upstream proxy / tsnet Funnel TLS
+                       |
+       ingress identity + effective trust + site allowlist
+                       |
+         one active routing/configuration generation
+                       |
+         security headers + site/origin validation
+                       |
+             passkey/session authorisation
+                       |
+            site's ReverseProxy -> backend
+```
+
+Each endpoint carries an atomic ingress policy. TLS connections remain intact so net/http supplies Request.TLS; the underlying Funnel connection supplies authenticated public-source metadata. Incoming HTTP headers cannot supply internal policy.
+
+The dispatcher selects the active policy and router together under a short state lock. WebAuthn/logout requests also take an authentication read lock to serialise durable credential/token mutations with generation snapshot and commit. No generation lock remains held while proxying long-lived responses.
+
+Local proxy trust is explicit per ingress. tsnet has no proxy trust and never grants local enrollment bypass. The site registry enforces allowlists; tsnet additionally checks exact authority, port and TLS SNI. See [INGRESSES.md](INGRESSES.md) for validation rules and state-directory ownership.
+
+## Authentication and session state
+
+One authentication handler per generation serves every listener, sharing challenge capacity, rate limits and enrollment budgets. WebAuthn instances are keyed by site and validate the site's RP ID/public origin. Registration consumes its accepted one-time enrollment code at the options step; challenges expire and are single-use.
+
+Users and credentials remain site-bound. Sessions include the exact credential ID; ordinary authorisation performs a read-locked membership check without copying credential records. WebAuthn operations use independent snapshots because they need the full credential data. Revoked credentials cannot authorise new requests; existing streams retain their selected backend until disconnection.
+
+`internal/session` protects its map with a mutex and returns independent session copies. LastSeen has RFC3339 second precision and reuses its string within that second. Session creation/deletion persists immediately; activity writes are batched. TTL is measured from creation, not activity.
+
+Enrollment state stores expiry, per-generation attempts and a cross-generation failure budget. Neither startup nor reload resets lockout. Code issuance and durable consumption are serialised. Optional bounded notification work uses GeoIP/Pushover without exposing codes in routine logs or API responses.
+
+## Endpoint lifecycle and reload
+
+The manager owns each listener, HTTP server, tracked connection set and provider cleanup function by stable ingress ID. Prepare reuses compatible endpoints and stages additions. Staged servers wait before Accept, so they cannot perform a handshake against an unpublished local certificate. Commit and rollback are mutually exclusive and idempotent.
+
+SIGHUP performs these steps:
+
+1. Snapshot/load the candidate while auth writes are blocked briefly.
+2. Validate sites/ingresses; prepare CA material, token expiry, auth handler, proxies, discovery and listeners without persisting the candidate.
+3. Reacquire the auth lock and check that the file did not change during staging. A changed file rejects the candidate.
+4. Persist prepared state, publish routing/certificates/policies, activate additions and retire removals.
+5. Close old auth/discovery resources; unchanged discovery is reused.
+
+Failed preparation closes additions and leaves the active generation running. Socket/node conflicts require remove/add across two reloads; session settings require restart. Existing SSE/WebSocket connections on reused endpoints survive. Removal explicitly closes tracked connections, including hijacked WebSockets, then closes the HTTP server and provider resources. There is no promise to drain removed streams gracefully.
+
+Each tsnet ingress owns a separate persistent node and Funnel listener. Initial enrollment uses a per-ingress environment secret reference. Process-wide login overrides are rejected. Bouncer checks certificate-domain and Funnel permissions, tracks newly enabled exposure and removes its owned changes during cleanup without erasing pre-existing exposure. Close is serialised; the readiness close watcher ends before ServeConfig changes.
+
+Upstream forbids Close concurrent with Start. Bouncer completes synchronous Start first, then bounds readiness to 60 seconds. Whole-startup/ListenFunnel cancellation, public certificates and teardown require live verification; local readiness does not prove external reachability.
+
+## TLS and discovery
+
+Only sites attached to local-CA ingresses contribute local SANs. The CA/server keys live in protected configuration, survive restart and are never disposable caches. Trust bootstrap uses a TLS-off local ingress with no proxy trust and an HTTPS local-CA owner. It serves trust instructions/downloads without authentication or passkey registration.
+
+mDNS is optional on local ingresses. Advertisements use the ingress port and public site metadata, never backend credentials. Unchanged records are retained during backend reloads. DNS-SD does not guarantee browser DNS aliases. Funnel hosts should use separate sites excluded from LAN certificate/discovery bindings.
+
+External Cloudflare remains a separate connector forwarding to a restricted local ingress. `server.cloudflare` controls certificate-step presentation and certificate-route registration in the main router; it does not create sockets, enable proxy trust or disable ingress TLS.
+
+## Persistence and allocation management
+
+`bouncer.json` stores configuration, CA material, users and enrollment state; a separate configured session file stores sessions. Atomic writes use temp file, sync and rename with mode 0600. Paths relative to configuration are resolved consistently. Use one writer per config/session pair and preserve current state when editing files.
+
+Proxy responses use pooled 32 KiB buffers, held for the response lifetime. GC can discard pool entries, and concurrent streams each need a buffer. Hostname resolution avoids unnecessary IP parsing and malformed host:port error allocations. See [allocation measurements](ALLOCATION-PASS-2026-10-08.md) for workload-specific results and limitations.
+
+Go 1.26.6 is the module/container minimum; allocation measurements used Go 1.27.1. Native amd64/arm64 packaging uses a non-root UID/GID 10001 with writable persistent `/data`. [AGENTS.md](../AGENTS.md) defines portable project-scoped cache/temp selection. Durable credentials, identities and deliverables stay outside that storage.
+
+## Verification
+
+Use `make check`, `make vuln`, uncached unit/race tests, real-process integration, HTTP/TLS Chromium and non-root container checks. Tests cover origin/host spoofing, trust isolation, credential revocation, failed-bind rollback, stream survival and persistent restart. Routine tests are unprofiled; `make profile` captures deliberate pre-release workloads and `make profile-diff` compares equivalent runs.
+
+[Ingress audit](INGRESS-AUDIT-2026-10-07.md) and [allocation pass](ALLOCATION-PASS-2026-10-08.md) record results and blockers. The latest container recheck failed for lack of disk space. Real tailnet/public Funnel acceptance requires explicit approval and an approved key; it is not part of routine CI.

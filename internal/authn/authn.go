@@ -23,6 +23,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"github.com/rcarmo/bouncer/internal/config"
+	"github.com/rcarmo/bouncer/internal/ingress"
 	"github.com/rcarmo/bouncer/internal/localip"
 	"github.com/rcarmo/bouncer/internal/notify"
 	"github.com/rcarmo/bouncer/internal/session"
@@ -89,11 +90,25 @@ const (
 
 // New creates a new WebAuthn handler.
 func New(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *site.Registry) (*Handler, error) {
+	return newHandler(cfg, sess, trusted, sites, true)
+}
+
+// Prepare constructs a reload candidate without writing configuration.
+func Prepare(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *site.Registry) (*Handler, error) {
+	return newHandler(cfg, sess, trusted, sites, false)
+}
+func newHandler(cfg *config.Config, sess *session.Store, trusted []*net.IPNet, sites *site.Registry, persist bool) (*Handler, error) {
 	if sites == nil {
 		return nil, fmt.Errorf("authn: sites registry is nil")
 	}
-	if err := cfg.InitializeEnrollmentToken(); err != nil {
-		return nil, fmt.Errorf("authn: token initialization: %w", err)
+	var tokenErr error
+	if persist {
+		tokenErr = cfg.InitializeEnrollmentToken()
+	} else {
+		tokenErr = cfg.PrepareEnrollmentToken()
+	}
+	if tokenErr != nil {
+		return nil, fmt.Errorf("authn: token initialization: %w", tokenErr)
 	}
 	wanBySite := make(map[string]*webauthn.WebAuthn)
 	for _, s := range sites.Sites {
@@ -846,10 +861,10 @@ func (h *Handler) notifyEnrollmentToken(meta enrollmentTokenMeta) {
 
 // IsLocalBypass is the shared attribution policy for enrollment and the auth UI.
 func (h *Handler) IsLocalBypass(r *http.Request) bool {
-	if !h.cfg.OnboardingSnapshot().LocalBypass {
+	if !h.cfg.OnboardingSnapshot().LocalBypass || !ingress.LocalBypass(r) {
 		return false
 	}
-	clientIP := localip.ClientIPFromRequest(r, h.trusted)
+	clientIP := localip.ClientIPFromRequest(r, ingress.Trusted(r, h.trusted))
 	return clientIP != nil && localip.IsLocal(clientIP)
 }
 
@@ -924,7 +939,7 @@ func (h *Handler) isTokenValid(r *http.Request, token string) bool {
 }
 
 func (h *Handler) clientIP(r *http.Request) string {
-	ip := localip.ClientIPFromRequest(r, h.trusted)
+	ip := localip.ClientIPFromRequest(r, ingress.Trusted(r, h.trusted))
 	if ip == nil {
 		return ""
 	}
@@ -936,7 +951,7 @@ func (h *Handler) geoHeadersFromRequest(r *http.Request) http.Header {
 		return nil
 	}
 	remote := localip.ExtractIP(r.RemoteAddr)
-	if remote == nil || len(h.trusted) == 0 || !localip.IsTrustedProxy(remote, h.trusted) {
+	if remote == nil || len(ingress.Trusted(r, h.trusted)) == 0 || !localip.IsTrustedProxy(remote, ingress.Trusted(r, h.trusted)) {
 		return nil
 	}
 	return r.Header
@@ -978,7 +993,7 @@ func (h *Handler) cookieSecure(r *http.Request) bool {
 		return true
 	}
 	clientIP := localip.ExtractIP(r.RemoteAddr)
-	if clientIP != nil && localip.IsTrustedProxy(clientIP, h.trusted) {
+	if clientIP != nil && localip.IsTrustedProxy(clientIP, ingress.Trusted(r, h.trusted)) {
 		return strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
 	}
 	return false

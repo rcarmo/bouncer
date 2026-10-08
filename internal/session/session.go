@@ -102,7 +102,13 @@ func (s *Store) Get(id string) *Session {
 		s.mu.Unlock()
 		return nil
 	}
-	sess.LastSeen = time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC()
+	// RFC3339 persistence has second precision. Reuse the string while its
+	// value is unchanged instead of allocating on every authenticated request.
+	seen, seenErr := time.Parse(time.RFC3339, sess.LastSeen)
+	if seenErr != nil || !seen.Equal(now.Truncate(time.Second)) {
+		sess.LastSeen = now.Format(time.RFC3339)
+	}
 	if time.Since(s.lastSave) > time.Minute {
 		needSave = true
 	}

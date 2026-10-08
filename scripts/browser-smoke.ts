@@ -23,7 +23,7 @@ const bootstrap=Bun.serve({hostname:'127.0.0.1',port:0,fetch(){return new Respon
 const bootstrapPort=bootstrap.port;bootstrap.stop(true);
 const origin=`${tls ? "https" : "http"}://localhost:${port}`;
 const cfgPath=join(dir,'bouncer.json');
-await Bun.write(cfgPath,JSON.stringify({server:{listen:`127.0.0.1:${port}`,cloudflare:!tls,httpListen:`127.0.0.1:${bootstrapPort}`,publicOrigin:origin,rpID:'localhost',hostnames:['localhost'],backend:`http://127.0.0.1:${backend.port}`},onboarding:{enabled:true,localBypass:false,oneTimeToken:true,token:'123456789012',geoip:{enabled:false}}}));
+await Bun.write(cfgPath,JSON.stringify({ingresses:[{id:'test',type:'local',siteIds:['default'],local:{listen:`127.0.0.1:${port}`,tls:tls?'local-ca':'off'}},...(tls?[{id:'trust',type:'local',siteIds:['default'],local:{listen:`127.0.0.1:${bootstrapPort}`,tls:'off',bootstrap:true}}]:[])],server:{listen:`127.0.0.1:${port}`,cloudflare:!tls,httpListen:`127.0.0.1:${bootstrapPort}`,publicOrigin:origin,rpID:'localhost',hostnames:['localhost'],backend:`http://127.0.0.1:${backend.port}`},onboarding:{enabled:true,localBypass:false,oneTimeToken:true,token:'123456789012',geoip:{enabled:false}}}));
 let process: ReturnType<typeof Bun.spawn>|undefined;
 let logs = '';
 let logReaders: Promise<void>[] = [];

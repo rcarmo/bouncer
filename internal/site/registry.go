@@ -11,6 +11,7 @@ import (
 	"strings"
 
 	"github.com/rcarmo/bouncer/internal/config"
+	"github.com/rcarmo/bouncer/internal/ingress"
 	"github.com/rcarmo/bouncer/internal/localip"
 	"golang.org/x/net/publicsuffix"
 )
@@ -145,12 +146,18 @@ func (r *Registry) Resolve(req *http.Request) *config.SiteConfig {
 	hostWithPort, host := r.requestHosts(req)
 	if hostWithPort != "" {
 		if s, ok := r.byHostPort[hostWithPort]; ok {
-			return s
+			if ingress.Allows(req, s) {
+				return s
+			}
+			return nil
 		}
 	}
 	if host != "" {
 		if s, ok := r.byHost[host]; ok {
-			return s
+			if ingress.Allows(req, s) {
+				return s
+			}
+			return nil
 		}
 	}
 	return nil
@@ -160,8 +167,13 @@ func (r *Registry) Resolve(req *http.Request) *config.SiteConfig {
 // honoring X-Forwarded-Host only when the source is a trusted proxy.
 func (r *Registry) requestHosts(req *http.Request) (string, string) {
 	host := req.Host
-	clientIP := localip.ExtractIP(req.RemoteAddr)
-	if clientIP != nil && localip.IsTrustedProxy(clientIP, r.trusted) {
+	trusted := ingress.Trusted(req, r.trusted)
+	// Direct listeners cannot honour forwarded hosts; avoid parsing their peer.
+	var clientIP net.IP
+	if len(trusted) > 0 {
+		clientIP = localip.ExtractIP(req.RemoteAddr)
+	}
+	if clientIP != nil && localip.IsTrustedProxy(clientIP, trusted) {
 		if xfh := req.Header.Get("X-Forwarded-Host"); xfh != "" {
 			// Use the first host in the list.
 			parts := strings.Split(xfh, ",")
@@ -236,12 +248,28 @@ func normalizeHost(host string) string {
 			host = u.Host
 		}
 	}
-	if h, _, err := net.SplitHostPort(host); err == nil {
-		host = h
+	if strings.Contains(host, ":") {
+		if h, _, err := net.SplitHostPort(host); err == nil {
+			host = h
+		}
 	}
 	host = strings.Trim(host, "[]")
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.String()
+	// ParseIP allocates error state for ordinary DNS names. Only numeric dotted
+	// hosts or colon-bearing IPv6 candidates need address canonicalisation.
+	candidate := strings.Contains(host, ":")
+	if !candidate {
+		candidate = true
+		for i := 0; i < len(host); i++ {
+			if (host[i] < '0' || host[i] > '9') && host[i] != '.' {
+				candidate = false
+				break
+			}
+		}
+	}
+	if candidate {
+		if ip := net.ParseIP(host); ip != nil {
+			return ip.String()
+		}
 	}
 	if strings.ContainsAny(host, " \t\r\n/") || strings.Contains(host, "://") {
 		return ""
@@ -259,8 +287,10 @@ func normalizeHostPort(host string) string {
 			host = u.Host
 		}
 	}
-	if h, p, err := net.SplitHostPort(host); err == nil {
-		return net.JoinHostPort(normalizeHost(h), p)
+	if strings.Contains(host, ":") {
+		if h, p, err := net.SplitHostPort(host); err == nil {
+			return net.JoinHostPort(normalizeHost(h), p)
+		}
 	}
 	return normalizeHost(host)
 }
@@ -350,6 +380,9 @@ func (r *Registry) ResolveBootstrap(req *http.Request) *config.SiteConfig {
 			return nil
 		}
 		found = s
+	}
+	if !ingress.Allows(req, found) {
+		return nil
 	}
 	return found
 }

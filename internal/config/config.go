@@ -20,6 +20,7 @@ import (
 type Config struct {
 	Server     ServerConfig     `json:"server"`
 	Sites      []SiteConfig     `json:"sites,omitempty"`
+	Ingresses  []IngressConfig  `json:"ingresses"`
 	Session    SessionConfig    `json:"session"`
 	Onboarding OnboardingConfig `json:"onboarding"`
 	Users      []User           `json:"users"`
@@ -145,6 +146,10 @@ type Credential struct {
 // Defaults returns a Config with sensible defaults.
 func Defaults() *Config {
 	return &Config{
+		Ingresses: []IngressConfig{
+			{ID: "lan", Type: "local", SiteIDs: []string{"default"}, Local: &LocalIngress{Listen: ":443", TLS: "local-ca"}},
+			{ID: "trust", Type: "local", SiteIDs: []string{"default"}, Local: &LocalIngress{Listen: ":80", TLS: "off", Bootstrap: true}},
+		},
 		Server: ServerConfig{
 			Listen:       ":443",
 			PublicOrigin: "https://bouncer.local",
@@ -214,7 +219,8 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("config: read: %w", err)
 	}
 
-	cfg := Defaults() // Start with defaults so missing fields get defaults.
+	cfg := Defaults()   // Non-listener settings retain defaults.
+	cfg.Ingresses = nil // Existing files must explicitly declare authoritative ingresses.
 	if err := json.Unmarshal(data, cfg); err != nil {
 		return nil, fmt.Errorf("config: parse: %w", err)
 	}
@@ -268,6 +274,27 @@ func (c *Config) AddUser(u User) error {
 		return err
 	}
 	return nil
+}
+
+// HasCredential checks revocation without copying sensitive credential records.
+func (c *Config) HasCredential(siteID, userID, credentialID string) bool {
+	if credentialID == "" {
+		return false
+	}
+	siteID = normalizeSiteID(siteID)
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	for _, u := range c.Users {
+		if u.ID == userID && normalizeSiteID(u.SiteID) == siteID {
+			for _, cred := range u.Credentials {
+				if cred.ID == credentialID {
+					return true
+				}
+			}
+			return false
+		}
+	}
+	return false
 }
 
 // FindUserByCredentialID returns a user and credential index, or nil.
@@ -389,13 +416,20 @@ func (c *Config) SetEnrollmentToken(token string) error {
 
 // InitializeEnrollmentToken upgrades legacy tokens once, persisting the
 // deadline so subsequent restarts cannot extend their lifetime.
-func (c *Config) InitializeEnrollmentToken() error {
+func (c *Config) InitializeEnrollmentToken() error { return c.initializeEnrollmentToken(true) }
+
+// PrepareEnrollmentToken sets candidate expiry without persisting a reload.
+func (c *Config) PrepareEnrollmentToken() error { return c.initializeEnrollmentToken(false) }
+func (c *Config) initializeEnrollmentToken(persist bool) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.Onboarding.Token == "" || !c.Onboarding.TokenExpiresAt.IsZero() {
 		return nil
 	}
 	c.Onboarding.TokenExpiresAt = time.Now().Add(EnrollmentTokenTTL).UTC()
+	if !persist {
+		return nil
+	}
 	if err := c.saveLocked(); err != nil {
 		c.Onboarding.TokenExpiresAt = time.Time{}
 		return err

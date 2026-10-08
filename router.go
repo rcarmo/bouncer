@@ -5,6 +5,7 @@ import (
 	"github.com/rcarmo/bouncer/internal/authn"
 	"github.com/rcarmo/bouncer/internal/ca"
 	"github.com/rcarmo/bouncer/internal/config"
+	"github.com/rcarmo/bouncer/internal/ingress"
 	"github.com/rcarmo/bouncer/internal/session"
 	"github.com/rcarmo/bouncer/internal/site"
 	"github.com/rcarmo/bouncer/web"
@@ -175,20 +176,18 @@ func newRouter(cfg *config.Config, siteRegistry *site.Registry, authnHandler *au
 		}
 	})
 
-	return withSecurityHeaders(mux, func() []*net.IPNet { return trusted })
+	guarded := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ingress.FromRequest(r) != nil && siteRegistry.Resolve(r) == nil {
+			http.NotFound(w, r)
+			return
+		}
+		mux.ServeHTTP(w, r)
+	})
+	return withSecurityHeaders(guarded, func() []*net.IPNet { return trusted })
 }
 func sessionAuthorized(cfg *config.Config, sess *session.Session, siteID string) bool {
 	if sess == nil || sess.SiteID != siteID {
 		return false
 	}
-	user := cfg.FindUserByID(siteID, sess.UserID)
-	if user == nil || sess.CredentialID == "" {
-		return false
-	}
-	for _, cred := range user.Credentials {
-		if cred.ID == sess.CredentialID {
-			return true
-		}
-	}
-	return false
+	return cfg.HasCredential(siteID, sess.UserID, sess.CredentialID)
 }

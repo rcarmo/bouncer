@@ -1,5 +1,5 @@
 # Bouncer Audit Report
-Latest: [October 2026 end-to-end audit](AUDIT-2026-10.md). The findings below are historical.
+Current evidence: [ingress audit](INGRESS-AUDIT-2026-10-07.md) and [allocation pass](ALLOCATION-PASS-2026-10-08.md). The [5 October audit](AUDIT-2026-10.md) and findings below are historical; current behaviour is defined in [INGRESSES.md](INGRESSES.md) and [SPEC.md](../SPEC.md).
 
 
 **Audited by:** GPT-5.2-Codex  

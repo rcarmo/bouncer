@@ -4,7 +4,7 @@ set -euo pipefail
 umask 077
 cd "$(dirname "$0")/.."
 mode=${1:?test mode required}
-root=${PROFILE_ROOT:-artifacts/allocations}
+root=${PROFILE_ROOT:?Run through Make to select project-scoped profile storage}
 mkdir -p "$root"
 run=$(mktemp -d "$root/$(date -u +%Y%m%dT%H%M%SZ)-$mode-XXXXXX")
 run=$(cd "$run" && pwd)

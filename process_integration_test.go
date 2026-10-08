@@ -4,6 +4,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"net"
 	"net/http"
@@ -37,6 +38,7 @@ func TestProcessStreams(t *testing.T) {
 	cfg.Server.Hostnames = []string{"127.0.0.1"}
 	cfg.Server.PublicOrigin = "http://" + addr
 	cfg.Server.RPID = "127.0.0.1"
+	cfg.Ingresses = []config.IngressConfig{{ID: "test", Type: "local", SiteIDs: []string{"default"}, Local: &config.LocalIngress{Listen: cfg.Server.Listen, TLS: "off"}}}
 	if e = cfg.Save(); e != nil {
 		t.Fatal(e)
 	}
@@ -204,6 +206,102 @@ func TestProcessStreams(t *testing.T) {
 	if e != nil {
 		t.Fatal(e)
 	}
+	// Failed bind must leave prepared token expiry unpersisted and streams live.
+	occupied, e := net.Listen("tcp", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer occupied.Close()
+	disk.Onboarding.Token = "123456789012"
+	disk.Onboarding.TokenExpiresAt = time.Time{}
+	disk.Ingresses = append(disk.Ingresses, config.IngressConfig{ID: "blocked", Type: "local", SiteIDs: []string{"default"}, Local: &config.LocalIngress{Listen: occupied.Addr().String(), TLS: "off"}})
+	if e = disk.Save(); e != nil {
+		t.Fatal(e)
+	}
+	before, e := os.ReadFile(cfg.Path())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if e = cmd.Process.Signal(syscall.SIGHUP); e != nil {
+		t.Fatal(e)
+	}
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		output, err := os.ReadFile(log.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if bytes.Contains(output, []byte("config reload failed")) {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("failed bind reload was not processed")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	after, e := os.ReadFile(cfg.Path())
+	if e != nil {
+		t.Fatal(e)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("failed reload persisted candidate")
+	}
+	readEvent()
+	echo("failed-reload")
+	occupied.Close()
+	disk.Ingresses = disk.Ingresses[:1]
+	disk.Onboarding.Token = ""
+
+	extraListener, e := net.Listen("tcp", "127.0.0.1:0")
+	if e != nil {
+		t.Fatal(e)
+	}
+	extraAddr := extraListener.Addr().String()
+	_ = extraListener.Close()
+	disk.Ingresses = append(disk.Ingresses, config.IngressConfig{ID: "extra", Type: "local", SiteIDs: []string{"default"}, Local: &config.LocalIngress{Listen: extraAddr, TLS: "off"}})
+	if e := disk.Save(); e != nil {
+		t.Fatal(e)
+	}
+	_ = cmd.Process.Signal(syscall.SIGHUP)
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+extraAddr+"/login", nil)
+		req.Host = addr
+		resp, e := http.DefaultClient.Do(req)
+		if e == nil {
+			_ = resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("added ingress not ready")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	echo("after-add")
+	readEvent()
+	disk.Ingresses = disk.Ingresses[:1]
+	if e := disk.Save(); e != nil {
+		t.Fatal(e)
+	}
+	_ = cmd.Process.Signal(syscall.SIGHUP)
+	deadline = time.Now().Add(3 * time.Second)
+	for {
+		req, _ := http.NewRequest(http.MethodGet, "http://"+extraAddr+"/login", nil)
+		req.Host = addr
+		resp, e := http.DefaultClient.Do(req)
+		if e != nil {
+			break
+		}
+		_ = resp.Body.Close()
+		if time.Now().After(deadline) {
+			t.Fatal("removed ingress still open")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	echo("after-remove")
+	readEvent()
 	disk.Users[0].Credentials = []config.Credential{{ID: "replacement"}}
 	if e = disk.Save(); e != nil {
 		t.Fatal(e)

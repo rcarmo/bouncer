@@ -18,7 +18,7 @@ concurrency:
 
 jobs:
   validate:
-    name: Validate release with allocation profiles
+    name: Validate release
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -27,7 +27,8 @@ jobs:
       - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version-file: go.mod
-      - name: Validate and profile
+          cache: false
+      - name: Validate
         run: |
           make check
           make test-race
@@ -38,8 +39,8 @@ jobs:
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          name: release-allocations-${{ github.run_id }}-${{ github.run_attempt }}
-          path: artifacts/allocations/
+          name: release-validation-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bouncer/tests/container/
           if-no-files-found: error
           retention-days: 14
 

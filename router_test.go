@@ -173,35 +173,6 @@ func TestOnboardingAttributionAndCache(t *testing.T) {
 	}
 }
 
-func TestListenerReloadWithDerivedIDs(t *testing.T) {
-	a := config.Defaults()
-	b := config.Defaults()
-	a.Sites = []config.SiteConfig{{PublicOrigin: "https://a.local", Listen: ":8441"}, {PublicOrigin: "https://b.local", Listen: ":8442"}}
-	b.Sites = append([]config.SiteConfig(nil), a.Sites...)
-	b.Sites[0].Listen = ":8443"
-	if sameListeners(a, b) {
-		t.Fatal("listener change with omitted IDs accepted")
-	}
-	b.Sites[0].Listen = ":8441"
-	if !sameListeners(a, b) {
-		t.Fatal("unchanged listeners rejected")
-	}
-}
-
-func TestCLIHostSetsWebAuthnOrigin(t *testing.T) {
-	c := config.Defaults()
-	c.Server.Listen = "127.0.0.1:8443"
-	applyCLIOrigin(c, []string{"myhost.local"}, nil)
-	if c.Server.PublicOrigin != "https://myhost.local:8443" || c.Server.RPID != "myhost.local" {
-		t.Fatal("CLI hostname did not update WebAuthn origin")
-	}
-	c.Server.Cloudflare = true
-	applyCLIOrigin(c, []string{"public.example"}, nil)
-	if c.Server.PublicOrigin != "https://public.example" {
-		t.Fatal("tunnel origin contains internal port")
-	}
-}
-
 func TestCredentialRevocationAndLegacySessions(t *testing.T) {
 	backend := httptest.NewServer(streamBackend("test"))
 	defer backend.Close()

@@ -170,3 +170,23 @@ func TestInvalidBackend(t *testing.T) {
 		}
 	}
 }
+
+func TestResponseBufferPoolShape(t *testing.T) {
+	p := responseBufferPool{}
+	b := p.Get()
+	if len(b) != 32*1024 || cap(b) != 32*1024 {
+		t.Fatalf("unexpected buffer size %d/%d", len(b), cap(b))
+	}
+	p.Put(b[:1])
+	b = p.Get()
+	if len(b) != 32*1024 {
+		t.Fatal("pool retained shortened slice")
+	}
+	p.Put(b)
+	p.Put(make([]byte, 10)) // Unexpected buffer sizes must never poison the pool.
+	b = p.Get()
+	if len(b) != 32*1024 {
+		t.Fatal("pool retained incompatible buffer")
+	}
+	p.Put(b)
+}
