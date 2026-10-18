@@ -4,6 +4,7 @@ import (
 	"github.com/rcarmo/bouncer/internal/config"
 	"net/http/httptest"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -41,7 +42,7 @@ func TestOriginPortAndIPv6Aliases(t *testing.T) {
 	for _, host := range []string{"192.168.1.50", "[2001:db8::1]"} {
 		for _, listen := range []bool{false, true} {
 			cfg := config.Defaults()
-			cfg.Sites = []config.SiteConfig{{ID: "a", PublicOrigin: "https://" + host + ":8441", Backend: "http://[::1]:3001", Hostnames: []string{host}}, {ID: "b", PublicOrigin: "https://" + host + ":8442", Backend: "http://localhost:3002", Hostnames: []string{host}}}
+			cfg.Sites = []config.SiteConfig{{ID: "a", PublicOrigin: "https://gateway.local:8441", Backend: "http://[::1]:3001", Hostnames: []string{host + ":8441"}}, {ID: "b", PublicOrigin: "https://gateway.local:8442", Backend: "http://localhost:3002", Hostnames: []string{host + ":8442"}}}
 			if listen {
 				cfg.Sites[0].Listen = ":8441"
 				cfg.Sites[1].Listen = ":8442"
@@ -67,7 +68,7 @@ func TestOriginPortAndIPv6Aliases(t *testing.T) {
 
 func TestSANAggregation(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.Sites = []config.SiteConfig{{ID: "a", PublicOrigin: "https://[2001:db8::1]:8441", Backend: "http://localhost/base?q=x", Hostnames: []string{"EXAMPLE.COM:8441", "192.168.1.50:8441", "[2001:0db8::1]:8441"}, IPAddresses: []string{"2001:0db8::1", "192.168.1.50"}}}
+	cfg.Sites = []config.SiteConfig{{ID: "a", PublicOrigin: "https://example.com:8441", Backend: "http://localhost/base?q=x", Hostnames: []string{"EXAMPLE.COM:8441", "192.168.1.50:8441", "[2001:0db8::1]:8441"}, IPAddresses: []string{"2001:0db8::1", "192.168.1.50"}}}
 	reg, err := New(cfg, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -82,8 +83,8 @@ func TestSANAggregation(t *testing.T) {
 
 func TestIPv6HostWithoutPort(t *testing.T) {
 	cfg := config.Defaults()
-	cfg.Server.PublicOrigin = "https://[::1]"
-	cfg.Server.RPID = "::1"
+	cfg.Server.PublicOrigin = "https://bouncer.local"
+	cfg.Server.RPID = "bouncer.local"
 	cfg.Server.Hostnames = []string{"::1"}
 	reg, err := New(cfg, nil)
 	if err != nil {
@@ -103,7 +104,7 @@ func TestRPIDRelationship(t *testing.T) {
 		host, rp string
 		valid    bool
 	}{
-		{"app.example.com", "example.com", true}, {"app.example.com", "app.example.com", true}, {"localhost", "localhost", true}, {"bouncer.local", "bouncer.local", true}, {"192.168.1.50", "192.168.1.50", true},
+		{"app.example.com", "example.com", true}, {"app.example.com", "app.example.com", true}, {"localhost", "localhost", true}, {"bouncer.local", "bouncer.local", true}, {"192.168.1.50", "192.168.1.50", false}, {"::1", "::1", false},
 		{"app.example.com", "unrelated.example", false}, {"example.com", "ample.com", false}, {"app.example.com", "com", false}, {"app.co.uk", "co.uk", false}, {"foo.github.io", "github.io", false}, {"localhost", "localhost:8443", false}, {"192.168.1.50", "192.168.1.51", false},
 	} {
 		if err := validateRPID(tc.host, tc.rp); (err == nil) != tc.valid {
@@ -128,5 +129,16 @@ func TestBootstrapSeparatePort(t *testing.T) {
 	req.Host = "unknown.test:8080"
 	if r.ResolveBootstrap(req) != nil {
 		t.Fatal("unknown bootstrap host allowed")
+	}
+}
+
+func TestRegistryRejectsIPAddressWebAuthnOrigins(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "[::1]"} {
+		cfg := config.Defaults()
+		cfg.Server.PublicOrigin = "https://" + host
+		cfg.Server.RPID = strings.Trim(host, "[]")
+		if _, err := New(cfg, nil); err == nil {
+			t.Fatalf("accepted IP WebAuthn origin %q that the authentication library rejects", host)
+		}
 	}
 }

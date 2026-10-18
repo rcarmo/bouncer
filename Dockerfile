@@ -1,4 +1,4 @@
-FROM golang:1.27.1-alpine AS builder
+FROM golang:1.27.2-alpine AS builder
 ARG VERSION=dev
 ARG GO_BUILD_TAGS=
 WORKDIR /src

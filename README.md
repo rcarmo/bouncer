@@ -21,7 +21,7 @@ Bouncer protects HTTP backends with [WebAuthn](https://webauthn.guide/) passkeys
 
 ## Quick start
 
-Requires Go 1.27.1 or newer. Live tsnet/Funnel enrollment, certificates and teardown have not yet been verified with a tailnet account; local security, lifecycle and browser tests have passed. See [live acceptance](docs/TSNET-PLAN.md#authorised-live-acceptance).
+Requires Go 1.27.2 or newer. Live tsnet/Funnel enrollment, certificates and teardown have not yet been verified with a tailnet account; local security, lifecycle and browser tests have passed. See [live acceptance](docs/TSNET-PLAN.md#authorised-live-acceptance).
 
 Configure `sites[]` and `ingresses[]`, then validate and run:
 

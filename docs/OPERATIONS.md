@@ -20,7 +20,7 @@ Do not store durable state in build/test caches. Do not use a backup configurati
 
 ## Build and select an artifact
 
-For a source deployment, use Go 1.27.1 or newer:
+For a source deployment, use Go 1.27.2 or newer:
 
 ```sh
 make build

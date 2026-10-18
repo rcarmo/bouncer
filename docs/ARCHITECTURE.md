@@ -89,7 +89,7 @@ External Cloudflare remains a separate connector forwarding to a restricted loca
 
 Proxy responses use pooled 32 KiB buffers, held for the response lifetime. GC can discard pool entries, and concurrent streams each need a buffer. Hostname resolution avoids unnecessary IP parsing and malformed host:port error allocations. See [allocation measurements](ALLOCATION-PASS-2026-10-08.md) for workload-specific results and limitations.
 
-Go 1.27.1 is the module/container minimum; allocation measurements used Go 1.27.1. Native amd64/arm64 packaging uses a non-root UID/GID 10001 with writable persistent `/data`. [AGENTS.md](../AGENTS.md) defines portable project-scoped cache/temp selection. Durable credentials, identities and deliverables stay outside that storage.
+Go 1.27.2 is the module/container minimum; historical allocation measurements used Go 1.27.1. Native amd64/arm64 packaging uses a non-root UID/GID 10001 with writable persistent `/data`. [AGENTS.md](../AGENTS.md) defines portable project-scoped cache/temp selection. Durable credentials, identities and deliverables stay outside that storage.
 
 ## Verification
 

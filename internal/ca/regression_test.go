@@ -3,6 +3,8 @@ package ca
 import (
 	"crypto/rand"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/asn1"
 	"encoding/pem"
 	"testing"
 	"time"
@@ -29,7 +31,7 @@ func resign(t *testing.T, pair *config.KeyPair, parent *config.KeyPair, change f
 }
 
 func TestServerCertificateHealth(t *testing.T) {
-	for _, kind := range []string{"expired", "future", "near expiry", "healthy", "key mismatch", "different CA"} {
+	for _, kind := range []string{"expired", "future", "near expiry", "healthy", "key mismatch", "different CA", "client auth only", "unknown critical extension"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := loadTestConfig(t)
 			if err := EnsureCA(cfg); err != nil {
@@ -47,6 +49,12 @@ func TestServerCertificateHealth(t *testing.T) {
 				resign(t, cfg.Server.TLS.ServerCert, cfg.Server.TLS.CA, func(c *x509.Certificate) { c.NotAfter = time.Now().Add(29 * 24 * time.Hour) })
 			case "healthy":
 				resign(t, cfg.Server.TLS.ServerCert, cfg.Server.TLS.CA, func(c *x509.Certificate) { c.NotAfter = time.Now().Add(31 * 24 * time.Hour) })
+			case "client auth only":
+				resign(t, cfg.Server.TLS.ServerCert, cfg.Server.TLS.CA, func(c *x509.Certificate) { c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth} })
+			case "unknown critical extension":
+				resign(t, cfg.Server.TLS.ServerCert, cfg.Server.TLS.CA, func(c *x509.Certificate) {
+					c.ExtraExtensions = append(c.ExtraExtensions, pkix.Extension{Id: asn1.ObjectIdentifier{1, 2, 3, 4}, Critical: true, Value: []byte{5, 0}})
+				})
 			case "key mismatch":
 				cfg.Server.TLS.ServerCert.KeyPem = cfg.Server.TLS.CA.KeyPem
 			case "different CA":
@@ -71,7 +79,9 @@ func TestServerCertificateHealth(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if err := cert.CheckSignatureFrom(root); err != nil {
+			roots := x509.NewCertPool()
+			roots.AddCert(root)
+			if _, err := cert.Verify(x509.VerifyOptions{Roots: roots, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -79,7 +89,7 @@ func TestServerCertificateHealth(t *testing.T) {
 }
 
 func TestInvalidCANeverReplaced(t *testing.T) {
-	for _, kind := range []string{"bad cert", "bad key", "missing cert", "missing key", "mismatch", "expired", "future", "not CA", "no signing usage"} {
+	for _, kind := range []string{"bad cert", "bad key", "missing cert", "missing key", "mismatch", "expired", "future", "not CA", "no signing usage", "client auth only", "unknown critical extension"} {
 		t.Run(kind, func(t *testing.T) {
 			cfg := loadTestConfig(t)
 			if err := EnsureCA(cfg); err != nil {
@@ -107,6 +117,12 @@ func TestInvalidCANeverReplaced(t *testing.T) {
 				resign(t, kp, kp, func(c *x509.Certificate) { c.NotBefore = time.Now().Add(time.Hour) })
 			case "not CA":
 				resign(t, kp, kp, func(c *x509.Certificate) { c.IsCA = false; c.MaxPathLen = -1; c.MaxPathLenZero = false })
+			case "client auth only":
+				resign(t, kp, kp, func(c *x509.Certificate) { c.ExtKeyUsage = []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth} })
+			case "unknown critical extension":
+				resign(t, kp, kp, func(c *x509.Certificate) {
+					c.ExtraExtensions = append(c.ExtraExtensions, pkix.Extension{Id: asn1.ObjectIdentifier{1, 2, 3, 4}, Critical: true, Value: []byte{5, 0}})
+				})
 			case "no signing usage":
 				resign(t, kp, kp, func(c *x509.Certificate) { c.KeyUsage = x509.KeyUsageDigitalSignature })
 			}

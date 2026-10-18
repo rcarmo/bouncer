@@ -1,5 +1,5 @@
 {
   "private": true,
   "scripts": { "test:browser": "make test-browser" },
-  "devDependencies": { "playwright": "1.60.0" }
+  "devDependencies": { "playwright": "1.64.1" }
 }

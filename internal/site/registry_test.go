@@ -102,16 +102,16 @@ func TestRegistryPortAliasesAllowSameHostOnDifferentPorts(t *testing.T) {
 	cfg.Sites = []config.SiteConfig{
 		{
 			ID:           "smith-lan",
-			PublicOrigin: "https://192.168.1.50:8441",
-			RPID:         "192.168.1.50",
+			PublicOrigin: "https://gateway.local:8441",
+			RPID:         "gateway.local",
 			Backend:      "http://127.0.0.1:8081",
 			Hostnames:    []string{"192.168.1.50"},
 			Listen:       ":8441",
 		},
 		{
 			ID:           "jones-lan",
-			PublicOrigin: "https://192.168.1.50:8442",
-			RPID:         "192.168.1.50",
+			PublicOrigin: "https://gateway.local:8442",
+			RPID:         "gateway.local",
 			Backend:      "http://127.0.0.1:8082",
 			Hostnames:    []string{"192.168.1.50"},
 			Listen:       ":8442",

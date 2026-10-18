@@ -160,7 +160,7 @@ func (p *DBIPProvider) ensureDB(ctx context.Context, force bool) error {
 		return nil
 	}
 
-	if p.getDB() != nil && !p.updateDue() {
+	if !force && p.getDB() != nil && !p.updateDue() {
 		return nil
 	}
 
@@ -175,10 +175,6 @@ func (p *DBIPProvider) ensureDB(ctx context.Context, force bool) error {
 	if updateURL == "" {
 		return fmt.Errorf("dbip: update URL not resolved")
 	}
-	if p.getDB() != nil && p.lastSourceURL == updateURL && !p.updateDue() {
-		return nil
-	}
-
 	if err := p.downloadAndBuild(ctx, updateURL); err != nil {
 		return err
 	}
@@ -188,7 +184,7 @@ func (p *DBIPProvider) ensureDB(ctx context.Context, force bool) error {
 func (p *DBIPProvider) updateOnce() {
 	ctx, cancel := context.WithTimeout(p.lifecycleContext(), p.downloadTimeout())
 	defer cancel()
-	if err := p.ensureDB(ctx, true); err != nil {
+	if err := p.ensureDB(ctx, false); err != nil {
 		slog.Warn("dbip update failed", "error", err)
 	}
 }

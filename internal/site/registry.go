@@ -351,11 +351,8 @@ func validateRPID(host, rpID string) error {
 	if rpID == "" || strings.ContainsAny(rpID, "/?#@ ") {
 		return fmt.Errorf("invalid domain")
 	}
-	if net.ParseIP(host) != nil {
-		if net.ParseIP(rpID) == nil || !net.ParseIP(host).Equal(net.ParseIP(rpID)) {
-			return fmt.Errorf("IP origin requires matching RP ID")
-		}
-		return nil
+	if net.ParseIP(host) != nil || net.ParseIP(rpID) != nil {
+		return fmt.Errorf("WebAuthn public origin and RP ID must use DNS names, not IP addresses")
 	}
 	if host != rpID && !strings.HasSuffix(host, "."+rpID) {
 		return fmt.Errorf("RP ID is not an origin domain suffix")

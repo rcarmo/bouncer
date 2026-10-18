@@ -39,7 +39,7 @@ PROFILE_ROOT ?= $(WORKSPACE_TEST_DIR)/allocations
 
 GOBIN ?= $(shell GOTOOLCHAIN=local go env GOPATH)/bin
 export PATH := $(GOBIN):$(PATH)
-LINT_TOOLCHAIN ?= go1.27.1
+LINT_TOOLCHAIN ?= go1.27.2
 
 # Routine tests are uncached and unprofiled; profile is an explicit pre-release target.
 TEST_PACKAGES ?= ./...
@@ -92,7 +92,7 @@ tag-ghcr: dual-tag ## Convenience alias for dual-tag
 
 .PHONY: deps ingress-deps
 ingress-deps: | workspace-prepare
-	go get tailscale.com/tsnet@v1.102.5
+	go get tailscale.com/tsnet@v1.104.1
 
 deps: ## Download Go module dependencies
 	go mod download
@@ -102,13 +102,13 @@ install: deps ## Install project dependencies
 
 .PHONY: rebuild-dev-tools
 rebuild-dev-tools: workspace-prepare ## Rebuild lint tools with the configured current Go toolchain
-	GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
-	GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+	GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+	GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261015133444-707f2271f665
 
 .PHONY: install-dev
 install-dev: ## Install dev tools (golangci-lint, gosec)
-	@command -v golangci-lint >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.14.0
-	@command -v gosec >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
+	@command -v golangci-lint >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.15.0
+	@command -v gosec >/dev/null 2>&1 || GOTOOLCHAIN=$(LINT_TOOLCHAIN) go install github.com/securego/gosec/v2/cmd/gosec@v2.29.1-0.20261015133444-707f2271f665
 
 # =============================================================================
 # Quality
@@ -165,11 +165,11 @@ test-browser: build ## Test Chromium passkeys and streaming
 
 .PHONY: workflow-check
 workflow-check: ## Validate GitHub Actions workflows
-	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.7
+	go run github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
 
 .PHONY: vuln
 vuln: ## Check reachable Go vulnerabilities
-	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+	go run golang.org/x/vuln/cmd/govulncheck@v1.9.0 ./...
 
 .PHONY: test-browser-tls
 test-browser-tls: build ## Test Chromium with local TLS

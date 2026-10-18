@@ -12,9 +12,29 @@ mkdir -p "$root"
 out=$(mktemp -d "$root/$(date -u +%Y%m%dT%H%M%SZ)-container-XXXXXX")
 out=$(cd "$out" && pwd)
 name="bouncer-security-$$"
-trap 'engine_run rm -f "$name" >/dev/null 2>&1 || true' EXIT
+trap 'engine_run rm -fv "$name" >/dev/null 2>&1 || true' EXIT
 engine_run build --build-arg GO_BUILD_TAGS="$tags" --build-arg VERSION=security-test -t "$image" . > "$out/build.log" 2>&1
-engine_run run -d --name "$name" -e BOUNCER_ALLOC_PROFILE_DIR="$profile_dir" -p 127.0.0.1::443 -p 127.0.0.1::80 "$image" > "$out/container-id.txt"
+# Use the real entrypoint and image-owned anonymous volume, but disable external
+# GeoIP downloads. Container validation must not depend on a live data provider.
+cat > "$out/input.yaml" <<'YAML'
+ingresses:
+  - id: lan
+    type: local
+    siteIds: [default]
+    local: {listen: ":443", tls: local-ca}
+  - id: trust
+    type: local
+    siteIds: [default]
+    local: {listen: ":80", tls: "off", bootstrap: true}
+onboarding:
+  geoip: {enabled: false}
+YAML
+# This public fixture must be readable before Bouncer atomically replaces it
+# with mode-0600 state owned by the non-root process.
+chmod 0644 "$out/input.yaml"
+engine_run create --name "$name" -e BOUNCER_ALLOC_PROFILE_DIR="$profile_dir" -p 127.0.0.1::443 -p 127.0.0.1::80 "$image" > "$out/container-id.txt"
+engine_run cp "$out/input.yaml" "$name":/data/bouncer.yaml
+engine_run start "$name" > /dev/null
 port=$(engine_run port "$name" 443/tcp | head -1 | sed 's/.*://')
 ready=0
 for i in $(seq 1 100); do

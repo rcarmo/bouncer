@@ -33,11 +33,16 @@ func TestProcessStreams(t *testing.T) {
 		t.Fatal(e)
 	}
 	addr := ln.Addr().String()
+	_, port, e := net.SplitHostPort(addr)
+	if e != nil {
+		t.Fatal(e)
+	}
+	originAddr := net.JoinHostPort("localhost", port)
 	ln.Close()
 	cfg.Server.Listen = addr
-	cfg.Server.Hostnames = []string{"127.0.0.1"}
-	cfg.Server.PublicOrigin = "http://" + addr
-	cfg.Server.RPID = "127.0.0.1"
+	cfg.Server.Hostnames = []string{"localhost"}
+	cfg.Server.PublicOrigin = "http://" + originAddr
+	cfg.Server.RPID = "localhost"
 	cfg.Ingresses = []config.IngressConfig{{ID: "test", Type: "local", SiteIDs: []string{"default"}, Local: &config.LocalIngress{Listen: cfg.Server.Listen, TLS: "off"}}}
 	if e = cfg.Save(); e != nil {
 		t.Fatal(e)
@@ -82,7 +87,7 @@ func TestProcessStreams(t *testing.T) {
 	}()
 	client := &http.Client{Timeout: 3 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 	request := func(path string, auth bool) (*http.Response, error) {
-		req, _ := http.NewRequest("GET", "http://"+addr+path, nil)
+		req, _ := http.NewRequest("GET", cfg.Server.PublicOrigin+path, nil)
 		if auth {
 			req.AddCookie(&http.Cookie{Name: cfg.Session.CookieName, Value: cookie})
 		}
@@ -112,7 +117,7 @@ func TestProcessStreams(t *testing.T) {
 	}
 	// No client total timeout for an intentionally long-lived stream.
 	streamClient := &http.Client{}
-	req, _ := http.NewRequest("GET", "http://"+addr+"/events", nil)
+	req, _ := http.NewRequest("GET", cfg.Server.PublicOrigin+"/events", nil)
 	req.AddCookie(&http.Cookie{Name: cfg.Session.CookieName, Value: cookie})
 	resp, e := streamClient.Do(req)
 	if e != nil {
@@ -144,7 +149,7 @@ func TestProcessStreams(t *testing.T) {
 		}
 	}
 	readEvent()
-	wsCfg, e := websocket.NewConfig("ws://"+addr+"/ws", cfg.Server.PublicOrigin)
+	wsCfg, e := websocket.NewConfig("ws://"+originAddr+"/ws", cfg.Server.PublicOrigin)
 	if e != nil {
 		t.Fatal(e)
 	}
@@ -266,7 +271,7 @@ func TestProcessStreams(t *testing.T) {
 	deadline = time.Now().Add(3 * time.Second)
 	for {
 		req, _ := http.NewRequest(http.MethodGet, "http://"+extraAddr+"/login", nil)
-		req.Host = addr
+		req.Host = originAddr
 		resp, e := http.DefaultClient.Do(req)
 		if e == nil {
 			_ = resp.Body.Close()
@@ -289,7 +294,7 @@ func TestProcessStreams(t *testing.T) {
 	deadline = time.Now().Add(3 * time.Second)
 	for {
 		req, _ := http.NewRequest(http.MethodGet, "http://"+extraAddr+"/login", nil)
-		req.Host = addr
+		req.Host = originAddr
 		resp, e := http.DefaultClient.Do(req)
 		if e != nil {
 			break

@@ -99,8 +99,14 @@ func ensureServerCert(cfg *config.Config, persist bool) error {
 	if cfg.Server.TLS.ServerCert != nil && cfg.Server.TLS.ServerCert.CertPem != "" {
 		cert, _, err := parseKeyPair(cfg.Server.TLS.ServerCert)
 		now := time.Now()
-		if err == nil && !now.Before(cert.NotBefore) && cert.NotAfter.After(now.Add(30*24*time.Hour)) && cert.CheckSignatureFrom(caCert) == nil && !sansChanged(cfg) {
-			return nil // Existing certificate is still usable.
+		if err == nil && cert.NotAfter.After(now.Add(30*24*time.Hour)) && !sansChanged(cfg) {
+			roots := x509.NewCertPool()
+			roots.AddCert(caCert)
+			// A matching signature and SANs alone do not make a certificate
+			// usable for TLS: verify server-auth usage and critical extensions too.
+			if _, err := cert.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err == nil {
+				return nil
+			}
 		}
 	}
 
@@ -305,6 +311,11 @@ func validatedCA(kp *config.KeyPair) (*x509.Certificate, *ecdsa.PrivateKey, erro
 	}
 	if err := cert.CheckSignatureFrom(cert); err != nil {
 		return nil, nil, fmt.Errorf("ca: invalid root signature: %w", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(cert)
+	if _, err := cert.Verify(x509.VerifyOptions{Roots: roots, CurrentTime: now, KeyUsages: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}}); err != nil {
+		return nil, nil, fmt.Errorf("ca: root is not usable for TLS server authentication: %w", err)
 	}
 	return cert, key, nil
 }
