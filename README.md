@@ -35,6 +35,20 @@ kill -HUP <pid>
 
 See [uniform ingress configuration](docs/INGRESSES.md) for local/mDNS, external Cloudflare and multiple embedded Funnel endpoints. Existing files must explicitly declare ingresses. Listener/backend/hostname CLI overrides are rejected.
 
+## Nix
+
+The locked flake provides `packages.default` / `packages.bouncer`, a runnable app and a development shell for `x86_64-linux` and `aarch64-linux`. It uses the Go 1.27 toolchain from the pinned nixpkgs input. Nix must have `nix-command` and `flakes` enabled.
+
+```sh
+nix build
+nix flake check
+nix develop
+```
+
+The package check runs the full uncached unit suite through `make test`, without profiling. The development shell includes Go, Make, Git, OpenSSL and Bun, and keeps lint tools on that Nix-provided Go toolchain. Browser prerequisites remain a separate setup step. Use `nix fmt flake.nix` to format the flake.
+
+Run `nix run . -- --config /path/to/bouncer.yaml --check-config` to validate configured sites and ingresses. Configure unprivileged listener ports or service-level bind capabilities before starting the server. Runtime configuration, sessions, CA keys and Tailscale state must stay in writable paths outside the immutable Nix store; the flake does not provision or overwrite them.
+
 ## CLI
 
 - `--config <path>`: YAML configuration path.

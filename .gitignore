@@ -1,4 +1,6 @@
 # Build artifacts
+/result
+/result-*
 bouncer
 bin/
 dist/
